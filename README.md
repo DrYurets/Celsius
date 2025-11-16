@@ -2,6 +2,8 @@
 
 A minimalist DIY clock project based on ESP32-C3 that displays time, date, temperature, and humidity on an OLED display. Features automatic brightness adjustment for night mode and WiFi-based time synchronization.
 
+![DIY Stellar Clock](outer_view.jpg)
+
 ## Inspiration
 
 This project is inspired by the [DIY Stellar Clock](https://sites.google.com/view/huy-materials-used/diy-stellar-clock) by Huy Vector DIY.
@@ -13,7 +15,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **SHT31-D Sensor** - Temperature and humidity sensor
 - **LED** - Status indicator (blinks at the start of each hour)
 - **Type-C Charging Module** - Power management
-- **Battery** - Power source
+- **Battery** - 18350B or similar 3.7V lithium battery
 - **Switch** - Power control
 - **Copper Wire** - Connections
 - **Steel Blank Earring** - Structural component
