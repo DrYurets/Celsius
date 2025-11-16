@@ -91,7 +91,7 @@ Before uploading the code, configure the following:
 ## Display Layout
 
 The display shows:
-- Top: Decorative line pattern
+- Top: Decorative line pattern (will be used for battery level indicator in the future, currently decorative only)
 - Date: Day.Month format
 - Time: Hours, Minutes, Seconds (large text)
 - Bottom: Temperature in °C and Humidity in %
