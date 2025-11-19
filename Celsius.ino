@@ -1,7 +1,3 @@
-// ------------------------------------------------------------------
-// Celsius Clock  →  35-40 суток, LIGHT-SLEEP 950 мс
-// Яркость 0 ночью, 1 днём – экран не гаснет полностью
-// ------------------------------------------------------------------
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -10,6 +6,7 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <esp_sleep.h>
+#include <driver/adc.h>
 
 #define WIFI_SSID       "WiFi_SSID"
 #define WIFI_PASSWORD   "WiFi_Password"
@@ -20,12 +17,18 @@
 #define SCREEN_WIDTH    128
 #define SCREEN_HEIGHT   32
 #define LED_PIN         0
+#define BAT_PIN         3            // GPIO 3
+#define SLEEP_US        950000UL     // 0,95 с
 
 #define NIGHT_START_H   0
 #define NIGHT_END_H     7
 #define SYNC_DAYS       4
 #define SYNC_PERIOD_SEC (SYNC_DAYS*24UL*3600UL)
-#define SLEEP_US        950000UL   // 0,95 с
+
+// ---------- батарея ----------
+#define BAT_V_MAX       4.2f
+#define BAT_V_MIN       3.0f
+#define BAT_STEPS       5
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -34,27 +37,40 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000);
 
 static uint32_t lastSyncEpoch = 0;
 static uint8_t  lastMin       = 99;
+static bool     sensorOK      = false;
+static float    tempC         = 22.0;
+static float    hum           = 50.0;
 
-static bool sensorOK = false;
-static float tempC   = 22.0;
-static float hum     = 50.0;
-
+// ---------- утилиты ----------
 bool isNight(int h) { return h >= NIGHT_START_H && h < NIGHT_END_H; }
 
-void setBrightness(uint8_t br) {   // 0 = почти чёрный, 1 = минимум
+void setBrightness(uint8_t br) {
   display.ssd1306_command(0x81);
   display.ssd1306_command(br);
 }
 
-void drawClock(int d, int mo, int h, int m) {
+float readBattery() {
+  uint32_t mv = analogReadMilliVolts(BAT_PIN);
+  return mv * 2.0f / 1000.0f;
+}
+
+void drawBattery(uint8_t bars) {
+  for (uint8_t i = 0; i < bars; i++) {
+    uint8_t x = 2 + i * 6;
+    display.fillRect(x, 0, 4, 2, SSD1306_WHITE);
+  }
+}
+
+void drawClock(int d, int mo, int h, int m, uint8_t batBars) {
   display.clearDisplay();
+  drawBattery(batBars);
   display.setTextSize(1);
-  display.setCursor(0, 7);   display.printf("%02d.%02d", d, mo);
-  display.drawLine(0, 20, 128, 20, SSD1306_WHITE);
+  display.setCursor(0, 8);   display.printf("%02d.%02d", d, mo);
+  display.drawLine(0, 23, 128, 23, SSD1306_WHITE);
 
   display.setTextSize(2);
-  display.setCursor(5, 30);  display.printf("%02d", h);
-  display.setCursor(5, 52);  display.printf("%02d", m);
+  display.setCursor(5, 36);  display.printf("%02d", h);
+  display.setCursor(5, 65);  display.printf("%02d", m);
   display.drawLine(0, 95, 128, 95, SSD1306_WHITE);
 
   display.setTextSize(1);
@@ -88,7 +104,10 @@ bool ntpSync() {
 }
 
 void setup() {
-  Serial.begin(115200); delay(100);
+  Serial.begin(115200);
+  delay(100);
+  analogSetPinAttenuation(BAT_PIN, ADC_11db);   // 0…2,5 В
+  pinMode(BAT_PIN, INPUT);                         // АЦП
   Wire.begin(I2C_SDA, I2C_SCL); Wire.setClock(100000);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
@@ -111,12 +130,11 @@ void setup() {
 }
 
 void loop() {
-  timeClient.update();               // можно вызывать всегда (Wi-Fi выключен)
+  timeClient.update();
   time_t local = timeClient.getEpochTime();
-  struct tm ti; gmtime_r(&local, &ti);
+  struct tm ti; localtime_r(&local, &ti);
   uint8_t min = ti.tm_min;
 
-  // синхронизация 1 раз в 4 суток в 00 мин
   if (min == 0 && (local - lastSyncEpoch) >= SYNC_PERIOD_SEC) ntpSync();
 
   if (min != lastMin) {
@@ -127,19 +145,33 @@ void loop() {
       if (!isnan(t) && !isnan(h)) { tempC = t; hum = h; }
     }
 
-    bool night = isNight(ti.tm_hour);
+    float vBat = readBattery();
+    uint16_t rawADC = analogRead(BAT_PIN);
+    Serial.printf("Raw ADC: %d, Calculated Vbat: %.3f V\n", rawADC, vBat);
 
-    // ★ ЯРКОСТЬ: 0 ночью, 1 днём – экран не гаснет, просто «чёрный»
+    int mappedValue = map(
+        (int)(vBat * 100),
+        (int)(BAT_V_MIN * 100),
+        (int)(BAT_V_MAX * 100),
+        0,
+        BAT_STEPS
+    );
+    
+    uint8_t batBars = constrain(mappedValue, 0, BAT_STEPS);
+
+    Serial.printf("Mapped Value: %d, Final BatBars: %d\n", mappedValue, batBars);
+
+    bool night = isNight(ti.tm_hour);
     setBrightness(night ? 0 : 1);
 
     if (!night) {
-      drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, min);
-      Serial.printf("🕗 %02d:%02d  %.1f°C  %.0f%%\n", ti.tm_hour, min, tempC, hum);
+      drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, min, batBars);
+      Serial.printf("... %02d:%02d  %.1f°C  %.0f%%  %d.%02d V, Bars: %d\n",
+                    ti.tm_hour, min, tempC, hum, (int)vBat, (int)(vBat * 100) % 100, batBars);
     } else {
-      Serial.printf("🌙 %02d:%02d  DIMMED\n", ti.tm_hour, min);
+      Serial.printf("... DIMMED ... V, Bars: %d\n", batBars);
     }
 
-    // светодиод только в 00 мин и только днём
     if (min == 0 && !night) {
       digitalWrite(LED_PIN, HIGH); delay(50);
       digitalWrite(LED_PIN, LOW);  delay(50);
@@ -149,6 +181,5 @@ void loop() {
   }
 
   esp_sleep_enable_timer_wakeup(SLEEP_US);
-  esp_light_sleep_start();   // ← не гасит OLED, просто спит 0,95 с
+  esp_light_sleep_start();
 }
-// ------------------------------------------------------------------
