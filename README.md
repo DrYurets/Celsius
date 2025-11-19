@@ -41,6 +41,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 
 - **Time Display** - Shows hours and minutes in large format
 - **Date Display** - Shows day and month (DD.MM format)
+- **Day of Week** - Displays day of week in Cyrillic characters (ПН, ВТ, СР, ЧТ, ПТ, СБ, ВС)
 - **Temperature & Humidity** - Displays readings from SHT31 sensor
 - **Battery Level Indicator** - 5-bar battery indicator at the top of the display
 - **WiFi Time Sync** - Automatically synchronizes time via NTP every 4 days
@@ -106,6 +107,7 @@ Before uploading the code, configure the following:
 The display shows:
 - **Top**: Battery level indicator (5 bars, 0-5 based on voltage 3.0V-4.2V)
 - **Date**: Day.Month format (DD.MM)
+- **Day of Week**: Cyrillic day abbreviation (ПН, ВТ, СР, ЧТ, ПТ, СБ, ВС) displayed below the date
 - **Time**: Hours and Minutes displayed separately in large text (2x size)
 - **Bottom**: Temperature in °C and Humidity in %
 
