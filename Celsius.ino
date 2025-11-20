@@ -3,20 +3,13 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_SHT31.h>
 #include <WiFi.h>
-#include <time.h>  // Стандартная библиотека времени ESP32
+#include <WiFiUdp.h>
+#include <NTPClient.h>
 #include <esp_sleep.h>
 #include <driver/adc.h>
-#include <esp_wifi.h>
 
-#define WIFI_SSID "M6"
-#define WIFI_PASSWORD "Bugaga2856"
-
-// Настройки времени (UTC+3 для Москвы, измените при необходимости)
-#define GMT_OFFSET_SEC (3 * 3600)
-#define DAYLIGHT_OFFSET_SEC 0
-#define NTP_SERVER1 "pool.ntp.org"
-#define NTP_SERVER2 "time.nist.gov"
-
+#define WIFI_SSID "WiFi_SSID"
+#define WIFI_PASSWORD "WiFi_Password"
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
@@ -25,39 +18,60 @@
 #define SCREEN_HEIGHT 32
 #define LED_PIN 0
 #define BAT_PIN 3          // GPIO 3
+#define SLEEP_US 950000UL  // 0,95 с
 
 #define NIGHT_START_H 0
 #define NIGHT_END_H 7
 #define SYNC_DAYS 4
 #define SYNC_PERIOD_SEC (SYNC_DAYS * 24UL * 3600UL)
-#define SYNC_RETRY_SEC (30UL * 60UL)
-
-#define WIFI_CONNECT_TIMEOUT_MS 10000UL
-#define WIFI_MAX_STATUS_POLLS 20
 
 // ---------- батарея ----------
-#define BAT_V_MAX 420  // 4.20V
-#define BAT_V_MIN 300  // 3.00V
-#define BAT_SAFE_WIFI 310 // Минимальное напряжение для включения WiFi (3.10V)
+#define BAT_V_MAX 4.0f
+#define BAT_V_MIN 3.0f
 #define BAT_STEPS 5
-#define LOW_BAT_LED_BARS 0
 
-#define SENSOR_MAX_FAILS 3
+#define SHOW_DEBUG_CODES 0
+
+// ---------- коды сообщений ----------
+#define CODE_WIFI_CONNECT "A1"    // подключение к Wi-Fi
+#define CODE_WIFI_FAIL "A2"       // Wi-Fi недоступен
+#define CODE_NTP_SYNC "B1"        // процесс синхронизации NTP
+#define CODE_NTP_OK "B2"          // время успешно синхронизировано
+#define CODE_NTP_ERROR "B3"       // ошибка NTP
+#define CODE_SENSOR_OK "C1"       // датчик SHT31 найден
+#define CODE_SENSOR_MISSING "C2"  // датчик SHT31 отсутствует
+#define CODE_FIRST_SYNC "D1"      // первая синхронизация
+#define CODE_SETUP_DONE "D2"      // завершение setup
+#define CODE_MEASURE_INFO "E1"    // минутное измерение батареи
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000);
 
-// Глобальные переменные состояния
+static uint32_t lastSyncEpoch = 0;
+static uint8_t lastMin = 99;
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
-static uint8_t sensorFailCount = 0;
+static bool displayOn = true;
 
-RTC_DATA_ATTR time_t lastSyncTime = 0;
-RTC_DATA_ATTR time_t lastSyncAttempt = 0;
-RTC_DATA_ATTR time_t cachedEpoch = 0;
-RTC_DATA_ATTR uint32_t lastSleepDuration = 60;
-RTC_DATA_ATTR bool hasValidTime = false;
+// ---------- утилиты ----------
+bool isNight(int h) {
+  return h >= NIGHT_START_H && h < NIGHT_END_H;
+}
+
+bool hasValidTime(time_t epoch) {
+  return epoch > 100000;
+}
+
+void setDisplayState(bool on) {
+  if (displayOn == on) {
+    return;
+  }
+  display.ssd1306_command(on ? 0xAF : 0xAE);
+  displayOn = on;
+}
 
 const uint8_t font5x8[][8] = {
   { 0b11111,
@@ -88,25 +102,10 @@ const uint8_t font5x8[][8] = {
     0b00000 }  // Б
 };
 
-// ---------- утилиты ----------
-bool isNight(int h) {
-  return h >= NIGHT_START_H && h < NIGHT_END_H;
-}
-
-float readBattery() {
-  uint32_t mv = analogReadMilliVolts(BAT_PIN);
-  
-  return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
-}
-
 void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
   wday = wday % 7;
 
   switch (wday) {
-    case 0:  // ВС
-      display.setCursor(x, y);
-      display.print("BC");
-      break;
     case 1:                                                       // ПН
       display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
       display.setCursor(x + 10, y);
@@ -125,7 +124,7 @@ void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
       display.setCursor(x + 10, y);
       display.print("T");
       break;
-    case 5:                                                       // ПТ
+    case 5:
       display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
       display.setCursor(x + 10, y);
       display.print("T");
@@ -135,7 +134,21 @@ void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
       display.print("C");
       display.drawBitmap(x + 10, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
       break;
+    case 0:  // ВС
+      display.setCursor(x, y);
+      display.print("BC");
+      break;
   }
+}
+
+void setBrightness(uint8_t br) {
+  display.ssd1306_command(0x81);
+  display.ssd1306_command(br);
+}
+
+float readBattery() {
+  uint32_t mv = analogReadMilliVolts(BAT_PIN);
+  return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
 }
 
 void drawBattery(uint8_t bars) {
@@ -162,6 +175,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.setCursor(5, 73);
   display.printf("%02d", m);
 
+
   display.drawLine(0, 98, 128, 98, SSD1306_WHITE);
 
   display.setTextSize(1);
@@ -171,228 +185,152 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.print("C");
   display.setCursor(9, 120);
   display.printf("%d%%", (int)hum);
-
   display.display();
 }
 
-void setDisplayState(bool on) {
-  static bool displayEnabled = true;
-  if (displayEnabled == on) {
-    return;
+void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
+  setDisplayState(true);
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(code);
+  if (detail != nullptr) {
+    display.setTextSize(1);
+    display.setCursor(0, 24);
+    display.print(detail);
   }
-  display.ssd1306_command(on ? 0xAF : 0xAE);
-  displayEnabled = on;
+  display.display();
+  if (holdMs > 0) {
+    delay(holdMs);
+  }
 }
 
 bool ntpSync() {
-  time_t attemptEpoch = cachedEpoch;
-  if (attemptEpoch == 0) {
-    time(&attemptEpoch);
+  logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; ++i) {
+    delay(500);
   }
-  lastSyncAttempt = attemptEpoch;
-
-  // Проверка батареи перед включением WiFi
-  if ((int)(readBattery() * 100) < BAT_SAFE_WIFI) {
+  if (WiFi.status() != WL_CONNECTED) {
+    logToDisplay(CODE_WIFI_FAIL);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
     return false;
   }
-
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(250);
+  logToDisplay(CODE_NTP_SYNC, nullptr, 0);
+  timeClient.begin();
+  bool ok = timeClient.forceUpdate();
+  if (ok) {
+    lastSyncEpoch = timeClient.getEpochTime();
+    logToDisplay(CODE_NTP_OK);
+  } else {
+    logToDisplay(CODE_NTP_ERROR);
   }
-
-  bool success = false;
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
-    for (int i = 0; i < WIFI_MAX_STATUS_POLLS; i++) {
-      time_t now;
-      time(&now);
-      struct tm timeinfo;
-      localtime_r(&now, &timeinfo);
-      if (timeinfo.tm_year > (2020 - 1900)) {
-        cachedEpoch = now;
-        hasValidTime = true;
-        lastSyncTime = now;
-        success = true;
-        break;
-      }
-      delay(400);
-    }
-  }
-
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-  btStop();  // гарантируем что BT выключен после WiFi
-  return success;
-}
-
-bool ensureLocalTime(struct tm &ti) {
-  if (getLocalTime(&ti, 0)) {
-    time_t nowEpoch = mktime(&ti);
-    if (nowEpoch > 0) {
-      cachedEpoch = nowEpoch;
-      hasValidTime = true;
-      if (lastSyncTime == 0) {
-        lastSyncTime = nowEpoch;
-      }
-    }
-    return true;
-  }
-
-  if (!hasValidTime) {
-    if (ntpSync() && getLocalTime(&ti, 0)) {
-      time_t nowEpoch = mktime(&ti);
-      if (nowEpoch > 0) {
-        cachedEpoch = nowEpoch;
-        hasValidTime = true;
-        lastSyncTime = nowEpoch;
-      }
-      return true;
-    }
-    return false;
-  }
-
-  if (cachedEpoch > 0) {
-    cachedEpoch += lastSleepDuration;
-    localtime_r(&cachedEpoch, &ti);
-    return true;
-  }
-
-  return false;
-}
-
-void lightSleepSeconds(uint32_t seconds) {
-  if (seconds == 0) {
-    seconds = 1;
-  }
-  lastSleepDuration = seconds;
-  Serial.flush();
-  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
-  esp_light_sleep_start();
+  return ok;
 }
 
 void setup() {
-  // 1. Отключаем BT для экономии
-  btStop();
-
   Serial.begin(115200);
   setCpuFrequencyMhz(80);
   delay(100);
-
-  // 2. Периферия
-  analogSetPinAttenuation(BAT_PIN, ADC_11db);
-  pinMode(BAT_PIN, INPUT);
+  analogSetPinAttenuation(BAT_PIN, ADC_11db);  // 0…2,5 В
+  pinMode(BAT_PIN, INPUT);                     // АЦП
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
 
-  // ВАЖНО: Инициализация дисплея
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    // Если дисплея нет, нет смысла продолжать, уходим в глубокий сон
-    esp_deep_sleep_start();
+    pinMode(LED_PIN, OUTPUT);
+    for (;;) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(200);
+      digitalWrite(LED_PIN, LOW);
+      delay(200);
+    }
   }
-
   display.setRotation(1);
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   display.display();
-  display.ssd1306_command(0x81);  // SETCONTRAST
-  display.ssd1306_command(0x01);  // 1/255
-  setDisplayState(true);
 
   sensorOK = sht31.begin(SHT31_ADDR);
+  logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // 3. Настройка времени
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
+  lastSyncEpoch = 0;
 
-  struct tm timeinfo;
-  if (!ensureLocalTime(timeinfo)) {
-    Serial.println(F("Time not available yet"));
-  }
-}
-
-void loop() {
-  struct tm ti;
-
-  if (!ensureLocalTime(ti)) {
-    // Времени нет совсем — делаем краткий сон и повторяем
-    lightSleepSeconds(10);
-    return;
-  }
-
-  // --- Чтение датчиков и батареи ---
-  if (!sensorOK) {
-    sensorOK = sht31.begin(SHT31_ADDR);
-  }
-
-  if (sensorOK) {
-    float t = sht31.readTemperature();
-    float h = sht31.readHumidity();
-    if (!isnan(t) && !isnan(h)) {
-      tempC = t;
-      hum = h;
-      sensorFailCount = 0;
-    } else {
-      sensorFailCount++;
-      if (sensorFailCount >= SENSOR_MAX_FAILS) {
-        sensorOK = sht31.begin(SHT31_ADDR);
-        sensorFailCount = 0;
-      }
-    }
-  }
-
-  float vBat = readBattery();
-  int mappedValue = map(
-      (int)(vBat * 100),
-      BAT_V_MIN,
-      BAT_V_MAX,
-      0,
-      BAT_STEPS);
-  uint8_t batBars = constrain(mappedValue, 0, BAT_STEPS);
-
-  // --- Отображение ---
-  bool night = isNight(ti.tm_hour);
-  if (!night) {
-    setDisplayState(true);
-    drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
-  } else {
-    display.clearDisplay();
-    display.display();
-    setDisplayState(false);
-  }
-
-  // --- Светодиодная индикация (каждый час) ---
-  if (ti.tm_min == 0 && !night && batBars > LOW_BAT_LED_BARS) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(40);
-    digitalWrite(LED_PIN, LOW);
-    delay(40);
-    digitalWrite(LED_PIN, HIGH);
-    delay(40);
-    digitalWrite(LED_PIN, LOW);
-  }
-
-  // --- Проверка необходимости синхронизации NTP ---
-  time_t nowEpoch = cachedEpoch;
-  if (nowEpoch > 0 &&
-      (nowEpoch - lastSyncTime) >= SYNC_PERIOD_SEC &&
-      (nowEpoch - lastSyncAttempt) >= SYNC_RETRY_SEC) {
+  if (lastSyncEpoch == 0) {
+    logToDisplay(CODE_FIRST_SYNC);
     ntpSync();
   }
 
-  // --- Умный сон до следующей минуты ---
-  int secondsToSleep = 60 - ti.tm_sec;
-  if (secondsToSleep <= 0) {
-    secondsToSleep = 1;
+  logToDisplay(CODE_SETUP_DONE, nullptr, 800);
+}
+
+void loop() {
+  timeClient.update();
+  time_t local = timeClient.getEpochTime();
+  bool timeValid = hasValidTime(local);
+  struct tm ti;
+  localtime_r(&local, &ti);
+  uint8_t min = ti.tm_min;
+
+  if (min == 0 && (local - lastSyncEpoch) >= SYNC_PERIOD_SEC) ntpSync();
+
+  if (min != lastMin) {
+    lastMin = min;
+    if (lastSyncEpoch == 0) {
+      ntpSync();
+    }
+
+    if (sensorOK) {
+      float t = sht31.readTemperature(), h = sht31.readHumidity();
+      if (!isnan(t) && !isnan(h)) {
+        tempC = t;
+        hum = h;
+      }
+    }
+
+    float vBat = readBattery();
+    uint16_t rawADC = analogRead(BAT_PIN);
+
+    int mappedValue = map(
+      (int)(vBat * 100),
+      (int)(BAT_V_MIN * 100),
+      (int)(BAT_V_MAX * 100),
+      0,
+      BAT_STEPS);
+    uint8_t batBars = constrain(mappedValue, 0, BAT_STEPS);
+
+#if SHOW_DEBUG_CODES
+    char detail[32];
+    snprintf(detail, sizeof(detail), "ADC%u V%.2f B%d/%d", rawADC, vBat, batBars, BAT_STEPS);
+    logToDisplay(CODE_MEASURE_INFO, detail, 600);
+#endif
+
+    bool night = timeValid && isNight(ti.tm_hour);
+
+    if (!timeValid) {
+      logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
+    } else if (!night) {
+      setDisplayState(true);
+      drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, min, batBars, ti.tm_wday);
+    } else {
+      display.clearDisplay();
+      display.display();
+      setDisplayState(false);
+    }
+
+    if (min == 0 && !night) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(80);
+      digitalWrite(LED_PIN, LOW);
+    }
   }
-  lightSleepSeconds(secondsToSleep);
+
+  esp_sleep_enable_timer_wakeup(SLEEP_US);
+  esp_light_sleep_start();
 }
