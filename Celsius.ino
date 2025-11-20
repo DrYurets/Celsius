@@ -6,6 +6,7 @@
 #include <time.h>  // Стандартная библиотека времени ESP32
 #include <esp_sleep.h>
 #include <driver/adc.h>
+#include <esp_wifi.h>
 
 #define WIFI_SSID "WiFi_SSID"
 #define WIFI_PASSWORD "WiFi_Password"
@@ -29,12 +30,19 @@
 #define NIGHT_END_H 7
 #define SYNC_DAYS 4
 #define SYNC_PERIOD_SEC (SYNC_DAYS * 24UL * 3600UL)
+#define SYNC_RETRY_SEC (30UL * 60UL)
+
+#define WIFI_CONNECT_TIMEOUT_MS 10000UL
+#define WIFI_MAX_STATUS_POLLS 20
 
 // ---------- батарея ----------
 #define BAT_V_MAX 420  // 4.20V
 #define BAT_V_MIN 300  // 3.00V
 #define BAT_SAFE_WIFI 340 // Минимальное напряжение для включения WiFi (3.40V)
 #define BAT_STEPS 5
+#define LOW_BAT_LED_BARS 2
+
+#define SENSOR_MAX_FAILS 3
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -43,7 +51,13 @@ Adafruit_SHT31 sht31 = Adafruit_SHT31();
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
-static time_t lastSyncTime = 0;
+static uint8_t sensorFailCount = 0;
+
+RTC_DATA_ATTR time_t lastSyncTime = 0;
+RTC_DATA_ATTR time_t lastSyncAttempt = 0;
+RTC_DATA_ATTR time_t cachedEpoch = 0;
+RTC_DATA_ATTR uint32_t lastSleepDuration = 60;
+RTC_DATA_ATTR bool hasValidTime = false;
 
 const uint8_t font5x8[][8] = {
   { 0b11111,
@@ -80,7 +94,9 @@ bool isNight(int h) {
 }
 
 float readBattery() {
+  adc_power_on();
   uint32_t mv = analogReadMilliVolts(BAT_PIN);
+  adc_power_off();
   return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
 }
 
@@ -157,46 +173,109 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.setCursor(9, 120);
   display.printf("%d%%", (int)hum);
 
-  display.ssd1306_command(0x81);  // SETCONTRAST
-  display.ssd1306_command(0x01);  // 1/255
   display.display();
 }
 
+void setDisplayState(bool on) {
+  static bool displayEnabled = true;
+  if (displayEnabled == on) {
+    return;
+  }
+  display.ssd1306_command(on ? 0xAF : 0xAE);
+  displayEnabled = on;
+}
+
 bool ntpSync() {
+  time_t attemptEpoch = cachedEpoch;
+  if (attemptEpoch == 0) {
+    time(&attemptEpoch);
+  }
+  lastSyncAttempt = attemptEpoch;
+
   // Проверка батареи перед включением WiFi
-  if (readBattery() * 100 < BAT_SAFE_WIFI) {
+  if ((int)(readBattery() * 100) < BAT_SAFE_WIFI) {
     return false;
   }
 
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(true);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
-  int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 20) {
-    delay(500);
-    tries++;
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
   }
 
   bool success = false;
   if (WiFi.status() == WL_CONNECTED) {
-    // configTime работает в фоновом режиме, но нам нужно убедиться, что время обновилось
-    // Ждем обновления времени (год > 2020)
-    time_t now;
-    for (int i = 0; i < 10; i++) {
-        time(&now);
-        struct tm timeinfo;
-        localtime_r(&now, &timeinfo);
-        if (timeinfo.tm_year > (2020 - 1900)) {
-            success = true;
-            break;
-        }
-        delay(500);
+    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
+    for (int i = 0; i < WIFI_MAX_STATUS_POLLS; i++) {
+      time_t now;
+      time(&now);
+      struct tm timeinfo;
+      localtime_r(&now, &timeinfo);
+      if (timeinfo.tm_year > (2020 - 1900)) {
+        cachedEpoch = now;
+        hasValidTime = true;
+        lastSyncTime = now;
+        success = true;
+        break;
+      }
+      delay(400);
     }
   }
 
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  btStop();  // гарантируем что BT выключен после WiFi
   return success;
+}
+
+bool ensureLocalTime(struct tm &ti) {
+  if (getLocalTime(&ti, 0)) {
+    time_t nowEpoch = mktime(&ti);
+    if (nowEpoch > 0) {
+      cachedEpoch = nowEpoch;
+      hasValidTime = true;
+      if (lastSyncTime == 0) {
+        lastSyncTime = nowEpoch;
+      }
+    }
+    return true;
+  }
+
+  if (!hasValidTime) {
+    if (ntpSync() && getLocalTime(&ti, 0)) {
+      time_t nowEpoch = mktime(&ti);
+      if (nowEpoch > 0) {
+        cachedEpoch = nowEpoch;
+        hasValidTime = true;
+        lastSyncTime = nowEpoch;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  if (cachedEpoch > 0) {
+    cachedEpoch += lastSleepDuration;
+    localtime_r(&cachedEpoch, &ti);
+    return true;
+  }
+
+  return false;
+}
+
+void lightSleepSeconds(uint32_t seconds) {
+  if (seconds == 0) {
+    seconds = 1;
+  }
+  lastSleepDuration = seconds;
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
+  esp_light_sleep_start();
 }
 
 void setup() {
@@ -224,6 +303,9 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   display.display();
+  display.ssd1306_command(0x81);  // SETCONTRAST
+  display.ssd1306_command(0x01);  // 1/255
+  setDisplayState(true);
 
   sensorOK = sht31.begin(SHT31_ADDR);
 
@@ -233,91 +315,85 @@ void setup() {
   // 3. Настройка времени
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER1, NTP_SERVER2);
 
-  // Первая синхронизация, если время не установлено
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 0)) {
-      if (ntpSync()) {
-          time(&lastSyncTime);
-      }
+  if (!ensureLocalTime(timeinfo)) {
+    Serial.println(F("Time not available yet"));
   }
 }
 
 void loop() {
   struct tm ti;
-  
-  // Получаем текущее локальное время
-  // Если время не установлено (например, после сброса и без WiFi), пробуем синхронизировать или используем то что есть
-  if (!getLocalTime(&ti, 0)) {
-      // Если время совсем сбито, пробуем синхронизировать
-       if (ntpSync()) {
-          time(&lastSyncTime);
-          getLocalTime(&ti, 0);
-       }
+
+  if (!ensureLocalTime(ti)) {
+    // Времени нет совсем — делаем краткий сон и повторяем
+    lightSleepSeconds(10);
+    return;
   }
 
   // --- Чтение датчиков и батареи ---
+  if (!sensorOK) {
+    sensorOK = sht31.begin(SHT31_ADDR);
+  }
+
   if (sensorOK) {
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
     if (!isnan(t) && !isnan(h)) {
       tempC = t;
       hum = h;
+      sensorFailCount = 0;
+    } else {
+      sensorFailCount++;
+      if (sensorFailCount >= SENSOR_MAX_FAILS) {
+        sensorOK = sht31.begin(SHT31_ADDR);
+        sensorFailCount = 0;
+      }
     }
   }
 
   float vBat = readBattery();
   int mappedValue = map(
-    (int)(vBat * 100),
-    BAT_V_MIN,
-    BAT_V_MAX,
-    0,
-    BAT_STEPS);
+      (int)(vBat * 100),
+      BAT_V_MIN,
+      BAT_V_MAX,
+      0,
+      BAT_STEPS);
   uint8_t batBars = constrain(mappedValue, 0, BAT_STEPS);
 
   // --- Отображение ---
   bool night = isNight(ti.tm_hour);
   if (!night) {
-    display.ssd1306_command(0xAF);  // OLED on
+    setDisplayState(true);
     drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
   } else {
     display.clearDisplay();
-    display.display(); 
-    display.ssd1306_command(0xAE);  // OLED off
+    display.display();
+    setDisplayState(false);
   }
 
   // --- Светодиодная индикация (каждый час) ---
-  if (ti.tm_min == 0 && !night) {
-    digitalWrite(LED_PIN, HIGH); delay(50);
-    digitalWrite(LED_PIN, LOW); delay(50);
-    digitalWrite(LED_PIN, HIGH); delay(50);
+  if (ti.tm_min == 0 && !night && batBars > LOW_BAT_LED_BARS) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(40);
+    digitalWrite(LED_PIN, LOW);
+    delay(40);
+    digitalWrite(LED_PIN, HIGH);
+    delay(40);
     digitalWrite(LED_PIN, LOW);
   }
 
   // --- Проверка необходимости синхронизации NTP ---
-  time_t now;
-  time(&now);
-  if ((now - lastSyncTime) >= SYNC_PERIOD_SEC) {
-    if (ntpSync()) {
-      lastSyncTime = now;
-    }
+  time_t nowEpoch = cachedEpoch;
+  if (nowEpoch > 0 &&
+      (nowEpoch - lastSyncTime) >= SYNC_PERIOD_SEC &&
+      (nowEpoch - lastSyncAttempt) >= SYNC_RETRY_SEC) {
+    ntpSync();
   }
 
   // --- Умный сон до следующей минуты ---
-  // Вычисляем, сколько секунд осталось до начала следующей минуты
-  // ti.tm_sec - текущие секунды (0..59)
   int secondsToSleep = 60 - ti.tm_sec;
-  
-  // Если мы в 59-й секунде, спим минимум 1 сек, чтобы перейти границу
-  if (secondsToSleep <= 0) secondsToSleep = 1;
-
-  // Конвертируем в микросекунды
-  uint64_t sleepTimeUs = (uint64_t)secondsToSleep * 1000000ULL;
-
-  // Выключаем Serial перед сном для стабильности
-  Serial.flush();
-  
-  esp_sleep_enable_timer_wakeup(sleepTimeUs);
-  esp_light_sleep_start();
-  
-  // После пробуждения цикл loop() начнется
+  if (secondsToSleep <= 0) {
+    secondsToSleep = 1;
+  }
+  lightSleepSeconds(secondsToSleep);
 }
