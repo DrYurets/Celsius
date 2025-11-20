@@ -8,8 +8,8 @@
 #include <driver/adc.h>
 #include <esp_wifi.h>
 
-#define WIFI_SSID "WiFi_SSID"
-#define WIFI_PASSWORD "WiFi_Password"
+#define WIFI_SSID "M6"
+#define WIFI_PASSWORD "Bugaga2856"
 
 // Настройки времени (UTC+3 для Москвы, измените при необходимости)
 #define GMT_OFFSET_SEC (3 * 3600)
@@ -38,9 +38,9 @@
 // ---------- батарея ----------
 #define BAT_V_MAX 420  // 4.20V
 #define BAT_V_MIN 300  // 3.00V
-#define BAT_SAFE_WIFI 340 // Минимальное напряжение для включения WiFi (3.40V)
+#define BAT_SAFE_WIFI 310 // Минимальное напряжение для включения WiFi (3.10V)
 #define BAT_STEPS 5
-#define LOW_BAT_LED_BARS 2
+#define LOW_BAT_LED_BARS 0
 
 #define SENSOR_MAX_FAILS 3
 
@@ -94,9 +94,8 @@ bool isNight(int h) {
 }
 
 float readBattery() {
-  adc_power_on();
   uint32_t mv = analogReadMilliVolts(BAT_PIN);
-  adc_power_off();
+  
   return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
 }
 
