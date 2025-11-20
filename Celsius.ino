@@ -20,7 +20,7 @@
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
 
-#define NIGHT_START_H 0
+#define NIGHT_START_H 23
 #define NIGHT_END_H 7
 #define SYNC_DAYS 4
 #define SYNC_PERIOD_SEC (SYNC_DAYS * 24UL * 3600UL)
@@ -47,7 +47,25 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000);
+const char *ntpServers[] = {
+  "time2.google.com",
+  "ntp1.vniiftri.ru",
+  "0.pool.ntp.org",
+  "pool.ntp.org",
+  "ntp.nsu.ru",
+  "time.google.com",
+  "time1.facebook.com",
+  "time1.google.com",
+  "time.aws.com",
+  "amazon.pool.ntp.org",
+  "time.facebook.com",
+  "time.cloudflare.com",
+  "time.windows.com"
+  "time2.facebook.com",
+};
+const size_t ntpServerCount = sizeof(ntpServers) / sizeof(ntpServers[0]);
+size_t ntpServerIndex = 0;
+NTPClient timeClient(ntpUDP, ntpServers[0], 3 * 3600, 60000);
 
 static uint32_t lastSyncEpoch = 0;
 static uint8_t lastMin = 99;
@@ -208,9 +226,16 @@ void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdM
 
 bool ntpSync() {
   logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; ++i) {
-    delay(500);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
+    delay(250);
   }
   if (WiFi.status() != WL_CONNECTED) {
     logToDisplay(CODE_WIFI_FAIL);
@@ -220,12 +245,14 @@ bool ntpSync() {
   }
   logToDisplay(CODE_NTP_SYNC, nullptr, 0);
   timeClient.begin();
+  timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
   bool ok = timeClient.forceUpdate();
   if (ok) {
     lastSyncEpoch = timeClient.getEpochTime();
     logToDisplay(CODE_NTP_OK);
   } else {
     logToDisplay(CODE_NTP_ERROR);
+    ntpServerIndex = (ntpServerIndex + 1) % ntpServerCount;
   }
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
