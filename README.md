@@ -45,6 +45,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Temperature & Humidity** - Displays readings from SHT31 sensor
 - **Battery Level Indicator** - 5-bar battery indicator at the top of the display
 - **WiFi Time Sync** - Automatically synchronizes time via NTP every 4 days
+- **Compact Status Codes** - Two-character codes (A1, B2, …) briefly appear to show WiFi/NTP/sensor states without crowding the OLED
 - **Power Efficiency** - Light sleep mode (950ms) for extended battery life (estimated 35-40 days, actual runtime may be significantly less)
 - **Night Mode** - During night hours (00:00 to 07:00), the display is completely turned off and the LED hour indicator is disabled to save power and avoid disturbance
 - **Hour Indicator** - LED blinks twice at the start of each hour (disabled during night mode)
@@ -79,6 +80,10 @@ Before uploading the code, configure the following:
 5. **Sleep Duration** (line 26):
    ```cpp
    #define SLEEP_US        950000UL     // 0.95 seconds
+   ```
+6. **Debug Codes** (line 33):
+   ```cpp
+   #define SHOW_DEBUG_CODES 0   // set to 1 to show per-minute ADC/battery info
    ```
 
 ## Pin Configuration
@@ -117,6 +122,25 @@ The display shows:
 - **Battery Life**: Estimated 35-40 days of continuous operation (calculated value; actual runtime may be significantly less depending on battery capacity, usage patterns, and environmental conditions)
 - **Battery Monitoring**: Voltage divider (1:1 ratio) on GPIO 3 using two 100 kΩ resistors, reads 0-2.5V range
 - **Night Mode**: During night hours (00:00-07:00), both the display and LED hour indicator are completely turned off to save power and avoid light disturbance during sleep
+
+## Status / Error Codes
+
+Short two-character codes flash on the display to report internal events:
+
+| Code | Meaning |
+| ---- | ------- |
+| `A1` | Attempting WiFi connection for NTP |
+| `A2` | WiFi connection failed |
+| `B1` | NTP synchronization in progress |
+| `B2` | Time synchronized successfully |
+| `B3` | Waiting for NTP (time not yet valid) |
+| `C1` | SHT31 sensor detected |
+| `C2` | SHT31 sensor missing |
+| `D1` | First sync attempt after boot |
+| `D2` | Setup routine finished |
+| `E1` | Minute-level ADC/battery log (shown only when `SHOW_DEBUG_CODES` = 1) |
+
+If the initial WiFi sync fails, the clock retries every minute until time is obtained; afterwards it re-syncs every 4 days at the next top-of-hour.
 
 ## Notes
 

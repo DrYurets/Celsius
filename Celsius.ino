@@ -190,6 +190,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
 void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
   setDisplayState(true);
+  setBrightness(0x01);
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(0, 0);
@@ -253,6 +254,7 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   display.display();
+  setBrightness(0x01);
 
   sensorOK = sht31.begin(SHT31_ADDR);
   logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
@@ -317,6 +319,7 @@ void loop() {
       logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
     } else if (!night) {
       setDisplayState(true);
+      setBrightness(0x01);
       drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, min, batBars, ti.tm_wday);
     } else {
       display.clearDisplay();
