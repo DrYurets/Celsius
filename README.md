@@ -1,6 +1,6 @@
 # DIY Stellar Clock - Celsius Version
 
-A minimalist DIY clock project based on ESP32-C3 that displays time, date, temperature, and humidity on an OLED display. Features automatic display and LED shutdown during night hours (00:00-07:00), WiFi-based time synchronization, battery level indicator, and power-efficient light sleep mode for extended battery life.
+A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on a 128×32 OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
 
 ![DIY Stellar Clock](outer_view.jpg)
 
@@ -39,16 +39,14 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 
 ## Features
 
-- **Time Display** - Shows hours and minutes in large format
-- **Date Display** - Shows day and month (DD.MM format)
-- **Day of Week** - Displays day of week in Cyrillic characters (ПН, ВТ, СР, ЧТ, ПТ, СБ, ВС)
-- **Temperature & Humidity** - Displays readings from SHT31 sensor
-- **Battery Level Indicator** - 5-bar battery indicator at the top of the display
-- **WiFi Time Sync** - Automatically synchronizes time via NTP every 4 days
-- **Compact Status Codes** - Two-character codes (A1, B2, …) briefly appear to show WiFi/NTP/sensor states without crowding the OLED
-- **Power Efficiency** - Light sleep mode (950ms) for extended battery life (estimated 35-40 days, actual runtime may be significantly less)
-- **Night Mode** - During night hours (00:00 to 07:00), the display is completely turned off and the LED hour indicator is disabled to save power and avoid disturbance
-- **Hour Indicator** - LED blinks twice at the start of each hour (disabled during night mode)
+- **Time & Date** – Hours/minutes plus DD.MM and weekday (Cyrillic abbreviations)
+- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption)
+- **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
+- **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid
+- **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
+- **Night Mode** – Display and LED fully off from 23:00 to 07:00; daytime brightness fixed at 1/255
+- **Hourly LED Blink** – Status LED toggles once at the top of every hour (disabled at night)
+- **Status Codes (optional)** – Two-character codes (A1, B2, …) can be shown for troubleshooting when `SHOW_DEBUG_CODES` is set to 1
 
 ## Configuration
 
@@ -74,16 +72,19 @@ Before uploading the code, configure the following:
 
 4. **Sync Period** (line 30):
    ```cpp
-   #define SYNC_DAYS       4   // Sync every 4 days
+   NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000); // GMT+3
+   ```
+   Change `3 * 3600` to your timezone offset (e.g., `7 * 3600` for GMT+7, `-5 * 3600` for GMT-5)
+
+3. **Night Mode Window** (lines ~23-24):
+   ```cpp
+   #define NIGHT_START_H 23   // start hour (23:00)
+   #define NIGHT_END_H   7    // end hour  (07:00)
    ```
 
-5. **Sleep Duration** (line 26):
+4. **Debug Codes** (line 34):
    ```cpp
-   #define SLEEP_US        950000UL     // 0.95 seconds
-   ```
-6. **Debug Codes** (line 33):
-   ```cpp
-   #define SHOW_DEBUG_CODES 0   // set to 1 to show per-minute ADC/battery info
+   #define SHOW_DEBUG_CODES 0   // set to 1 to show diagnostic codes on OLED
    ```
 
 ## Pin Configuration
@@ -109,46 +110,17 @@ Before uploading the code, configure the following:
 
 ## Display Layout
 
-The display shows:
-- **Top**: Battery level indicator (5 bars, 0-5 based on voltage 3.0V-4.2V)
-- **Date**: Day.Month format (DD.MM)
-- **Day of Week**: Cyrillic day abbreviation (ПН, ВТ, СР, ЧТ, ПТ, СБ, ВС) displayed below the date
-- **Time**: Hours and Minutes displayed separately in large text (2x size)
-- **Bottom**: Temperature in °C and Humidity in %
-
-## Power Management
-
-- **Light Sleep Mode**: Device enters light sleep for 950ms between updates to conserve power
-- **Battery Life**: Estimated 35-40 days of continuous operation (calculated value; actual runtime may be significantly less depending on battery capacity, usage patterns, and environmental conditions)
-- **Battery Monitoring**: Voltage divider (1:1 ratio) on GPIO 3 using two 100 kΩ resistors, reads 0-2.5V range
-- **Night Mode**: During night hours (00:00-07:00), both the display and LED hour indicator are completely turned off to save power and avoid light disturbance during sleep
-
-## Status / Error Codes
-
-Short two-character codes flash on the display to report internal events:
-
-| Code | Meaning |
-| ---- | ------- |
-| `A1` | Attempting WiFi connection for NTP |
-| `A2` | WiFi connection failed |
-| `B1` | NTP synchronization in progress |
-| `B2` | Time synchronized successfully |
-| `B3` | Waiting for NTP (time not yet valid) |
-| `C1` | SHT31 sensor detected |
-| `C2` | SHT31 sensor missing |
-| `D1` | First sync attempt after boot |
-| `D2` | Setup routine finished |
-| `E1` | Minute-level ADC/battery log (shown only when `SHOW_DEBUG_CODES` = 1) |
-
-If the initial WiFi sync fails, the clock retries every minute until time is obtained; afterwards it re-syncs every 4 days at the next top-of-hour.
+- Top: 5-bar battery indicator
+- Below top line: Date (DD.MM) and weekday (ПН / ВТ / …)
+- Middle: Hours and minutes rendered in large font
+- Bottom: Temperature (°C) and humidity (%)
 
 ## Notes
 
-- The device will continue to function even if WiFi connection fails (time won't sync, but will continue using last synced time)
-- The sensor is optional - the device will work without it (no temperature/humidity display)
-- **Night Mode Behavior**: During night hours (00:00-07:00), the display is completely turned off and the LED hour indicator (which normally blinks twice at the start of each hour) is disabled. This saves power and prevents light disturbance during sleep. During day hours, the display operates normally and the LED indicator functions as expected.
-- Time synchronization occurs automatically every 4 days at midnight (if WiFi is available)
-- Battery voltage is calculated from ADC reading with 2x multiplier (due to 1:1 voltage divider)
+- The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
+- If WiFi is unavailable at boot, the firmware retries every minute until time is obtained, then returns to low duty cycle.
+- Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
+- Status codes are disabled by default; enable `SHOW_DEBUG_CODES` for quick troubleshooting directly on the OLED.
 
 ## License
 
