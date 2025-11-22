@@ -1,6 +1,6 @@
 # DIY Stellar Clock - Celsius Version
 
-A minimalist DIY clock project based on ESP32-C3 that displays time, date, temperature, and humidity on an OLED display. Features automatic brightness adjustment for night mode and WiFi-based time synchronization.
+A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on a 128×32 OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
 
 ![DIY Stellar Clock](outer_view.jpg)
 
@@ -18,7 +18,6 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Battery** - 18350B or similar 3.7V lithium battery
 - **Switch** - Power control
 - **Copper Wire** - Connections
-- **Steel Blank Earring** - Structural component
 
 ## Software Requirements
 
@@ -39,12 +38,14 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 
 ## Features
 
-- **Time Display** - Shows hours, minutes, and seconds
-- **Date Display** - Shows day and month
-- **Temperature & Humidity** - Displays readings from SHT31 sensor
-- **WiFi Time Sync** - Automatically synchronizes time via NTP
-- **Night Mode** - Automatically reduces display brightness from 22:00 to 07:30
-- **Hour Indicator** - LED blinks at the start of each hour (disabled in night mode)
+- **Time & Date** – Hours/minutes plus DD.MM and weekday (Cyrillic abbreviations)
+- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption)
+- **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
+- **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid
+- **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
+- **Night Mode** – Display and LED fully off from 23:00 to 07:00; daytime brightness fixed at 1/255
+- **Hourly LED Blink** – Status LED toggles once at the top of every hour (disabled at night)
+- **Status Codes (optional)** – Two-character codes (A1, B2, …) can be shown for troubleshooting when `SHOW_DEBUG_CODES` is set to 1
 
 ## Configuration
 
@@ -62,10 +63,15 @@ Before uploading the code, configure the following:
    ```
    Change `3 * 3600` to your timezone offset (e.g., `7 * 3600` for GMT+7, `-5 * 3600` for GMT-5)
 
-3. **Night Mode Times** (lines 27-28):
+3. **Night Mode Window** (lines ~23-24):
    ```cpp
-   #define NIGHT_START_SEC (22 * 3600) // 22:00
-   #define NIGHT_END_SEC (7 * 3600 + 30 * 60) // 07:30
+   #define NIGHT_START_H 23   // start hour (23:00)
+   #define NIGHT_END_H   7    // end hour  (07:00)
+   ```
+
+4. **Debug Codes** (line 34):
+   ```cpp
+   #define SHOW_DEBUG_CODES 0   // set to 1 to show diagnostic codes on OLED
    ```
 
 ## Pin Configuration
@@ -90,18 +96,17 @@ Before uploading the code, configure the following:
 
 ## Display Layout
 
-The display shows:
-- Top: Decorative line pattern (will be used for battery level indicator in the future, currently decorative only)
-- Date: Day.Month format
-- Time: Hours, Minutes, Seconds (large text)
-- Bottom: Temperature in °C and Humidity in %
+- Top: 5-bar battery indicator
+- Below top line: Date (DD.MM) and weekday (ПН / ВТ / …)
+- Middle: Hours and minutes rendered in large font
+- Bottom: Temperature (°C) and humidity (%)
 
 ## Notes
 
-- The device will continue to function even if WiFi connection fails (time won't sync)
-- The sensor is optional - the device will work without it (no temperature/humidity display)
-- Display brightness automatically adjusts based on time of day
-- LED hour indicator is disabled during night mode to avoid disturbance
+- The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
+- If WiFi is unavailable at boot, the firmware retries every minute until time is obtained, then returns to low duty cycle.
+- Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
+- Status codes are disabled by default; enable `SHOW_DEBUG_CODES` for quick troubleshooting directly on the OLED.
 
 ## License
 
