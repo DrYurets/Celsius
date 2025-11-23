@@ -43,6 +43,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption)
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
 - **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid
+- **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync, typically ~4 days apart)
 - **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
 - **Night Mode** – Display and LED fully off from 23:00 to 07:00; daytime brightness fixed at 1/255
 - **Hourly LED Blink** – Status LED toggles once at the top of every hour (disabled at night)
@@ -118,6 +119,7 @@ Before uploading the code, configure the following:
 ## Notes
 
 - The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
+- **Time Drift Correction**: The device automatically measures and compensates for RTC drift between NTP synchronizations. After the second sync (typically 4+ days after first sync), the drift rate is calculated and applied continuously. This compensates for typical ESP32-C3 RTC drift (e.g., ~3 minutes per day) without requiring more frequent WiFi syncs.
 - If WiFi is unavailable at boot, the firmware retries every minute until time is obtained, then returns to low duty cycle.
 - Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
 - Status codes are disabled by default; enable `SHOW_DEBUG_CODES` for quick troubleshooting directly on the OLED.

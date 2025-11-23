@@ -78,6 +78,8 @@ RTC_DATA_ATTR time_t lastBatCheckEpoch = 0;
 RTC_DATA_ATTR uint16_t storedRawAdc = 0;
 RTC_DATA_ATTR uint8_t displayBackup[OLED_BUFFER_SIZE];
 RTC_DATA_ATTR bool displayBackupValid = false;
+RTC_DATA_ATTR int32_t driftCorrectionMs = 0;
+RTC_DATA_ATTR time_t lastSyncLocalEpoch = 0;
 
 static bool sensorOK = false;
 static float tempC = 22.0;
@@ -94,6 +96,18 @@ bool isNight(int h) {
 
 bool hasValidTime(time_t epoch) {
   return epoch > 100000;
+}
+
+time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
+  if (driftCorrectionMs == 0 || referenceEpoch == 0) {
+    return baseEpoch;
+  }
+  time_t elapsed = baseEpoch - referenceEpoch;
+  if (elapsed <= 0) {
+    return baseEpoch;
+  }
+  int64_t correctionSeconds = ((int64_t)elapsed * driftCorrectionMs) / 1000000LL;
+  return baseEpoch + (time_t)correctionSeconds;
 }
 
 void setCpuLowPower() {
@@ -305,8 +319,21 @@ bool ntpSync() {
   timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
   bool ok = timeClient.forceUpdate();
   if (ok) {
-    lastSyncEpoch = timeClient.getEpochTime();
-    storedEpoch = lastSyncEpoch;
+    time_t ntpEpoch = timeClient.getEpochTime();
+    time_t localRawEpoch = storedEpoch;
+    
+    if (lastSyncEpoch > 0 && lastSyncLocalEpoch > 0 && localRawEpoch > lastSyncLocalEpoch) {
+      time_t ntpElapsed = ntpEpoch - lastSyncEpoch;
+      time_t localElapsed = localRawEpoch - lastSyncLocalEpoch;
+      if (ntpElapsed > 3600) {
+        int64_t driftMs = ((int64_t)(ntpElapsed - localElapsed) * 1000000LL) / (int64_t)ntpElapsed;
+        driftCorrectionMs = (int32_t)driftMs;
+      }
+    }
+    
+    lastSyncEpoch = ntpEpoch;
+    lastSyncLocalEpoch = ntpEpoch;
+    storedEpoch = ntpEpoch;
     logToDisplay(CODE_NTP_OK);
   } else {
     logToDisplay(CODE_NTP_ERROR);
@@ -320,7 +347,7 @@ bool ntpSync() {
 
 uint32_t runCycle() {
   uint32_t cycleStartMs = millis();
-  time_t local = storedEpoch;
+  time_t local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
   bool timeValid = hasValidTime(local);
   struct tm ti = {};
   if (timeValid) {
@@ -328,7 +355,7 @@ uint32_t runCycle() {
   }
 
   bool needSync = !timeValid;
-  if (timeValid && (local - lastSyncEpoch) >= SYNC_PERIOD_SEC) {
+  if (timeValid && lastSyncLocalEpoch > 0 && (storedEpoch - lastSyncLocalEpoch) >= SYNC_PERIOD_SEC) {
     needSync = true;
   }
 
@@ -337,7 +364,7 @@ uint32_t runCycle() {
       logToDisplay(CODE_FIRST_SYNC);
     }
     if (ntpSync()) {
-      local = storedEpoch;
+      local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
       timeValid = hasValidTime(local);
       if (timeValid) {
         localtime_r(&local, &ti);
@@ -421,7 +448,7 @@ uint32_t runCycle() {
     }
     sleepSeconds = (uint32_t)secToNextMinute;
     uint32_t activeSeconds = ((millis() - cycleStartMs) + 500) / 1000;
-    storedEpoch = local + activeSeconds + sleepSeconds;
+    storedEpoch = storedEpoch + activeSeconds + sleepSeconds;
   } else {
     sleepSeconds = 30;
   }
