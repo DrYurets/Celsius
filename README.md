@@ -36,6 +36,8 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - `Wire.h` - I2C communication
 - `WiFiUdp.h` - UDP communication for NTP
 - `time.h` - Time functions
+- `WebServer.h` - HTTP server for WiFi configuration
+- `EEPROM.h` - Non-volatile storage for WiFi credentials
 
 ## Features
 
@@ -44,6 +46,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
 - **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid
 - **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync, typically ~4 days apart)
+- **Web Configuration Interface** – Built-in web server for WiFi setup via access point mode; no code modification needed
 - **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
 - **Night Mode** – Display and LED fully off from 23:00 to 07:00; daytime brightness fixed at 1/255
 - **Hourly LED Blink** – Status LED toggles once at the top of every hour (disabled at night)
@@ -51,41 +54,71 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 
 ## Configuration
 
-Before uploading the code, configure the following:
+### WiFi Setup (Web Interface)
 
-1. **WiFi Credentials** (lines 16-17):
-   ```cpp
-   #define WIFI_SSID       "WiFi_SSID"
-   #define WIFI_PASSWORD   "WiFi_Password"
-   ```
+The device automatically enters setup mode on first boot or when WiFi credentials are missing/invalid. **No code modification needed!**
 
-2. **Timezone** (line 41):
+**Setup Process:**
+
+1. **First Boot**: Device creates WiFi access point `CelsiusClock` (password: `12345678`)
+2. **Connect**: Join the `CelsiusClock` network from your phone/computer
+3. **Configure**: Open browser to `http://192.168.4.1` (or IP shown on display)
+4. **Enter Credentials**: Fill in your WiFi SSID and password, then click "Save and Reset"
+5. **Done**: Device reboots and connects to your WiFi network automatically
+
+**Setup Mode Behavior:**
+
+- Device displays "Setup mode" on the OLED with SSID and IP address
+- Web server runs at maximum CPU frequency (160 MHz) for responsiveness
+- Device does not enter deep sleep in setup mode
+- If WiFi connection fails after configuration, device automatically returns to setup mode
+- WiFi credentials are stored in EEPROM and persist across reboots
+
+**Resetting Settings:**
+
+There are two ways to reset settings and return to setup mode:
+
+1. **Via Web Interface** (when already in setup mode):
+   - Open the setup page at `http://192.168.4.1`
+   - Click the "Reset Settings" button
+   - Device will clear settings and reboot into setup mode
+
+2. **Via GPIO Reset** (hardware method):
+   - Short GPIO 0 (LED pin) to GND (ground) while powering on the device
+   - Hold for at least 50ms during startup
+   - Device will detect the reset condition, clear settings, and enter setup mode
+   - Diagnostic code I1 will be displayed on screen
+
+### Code Configuration (Optional)
+
+If you need to customize settings, modify these in the code:
+
+1. **Timezone** (line 71):
    ```cpp
    NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000);
    ```
-   Time is already set to GMT+3. Change `3 * 3600` to your timezone offset if needed.
+   Time is set to GMT+3. Change `3 * 3600` to your timezone offset if needed.
 
-3. **Night Mode Times** (lines 28-29):
-   ```cpp
-   #define NIGHT_START_H   0   // 00:00
-   #define NIGHT_END_H     7   // 07:00
-   ```
-
-4. **Sync Period** (line 30):
-   ```cpp
-   NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000); // GMT+3
-   ```
-   Change `3 * 3600` to your timezone offset (e.g., `7 * 3600` for GMT+7, `-5 * 3600` for GMT-5)
-
-3. **Night Mode Window** (lines ~23-24):
+2. **Night Mode Times** (lines 24-25):
    ```cpp
    #define NIGHT_START_H 23   // start hour (23:00)
    #define NIGHT_END_H   7    // end hour  (07:00)
    ```
 
-4. **Debug Codes** (line 34):
+3. **Sync Period** (line 26):
+   ```cpp
+   #define SYNC_DAYS 4   // NTP sync every 4 days
+   ```
+
+4. **Debug Codes** (line 41):
    ```cpp
    #define SHOW_DEBUG_CODES 0   // set to 1 to show diagnostic codes on OLED
+   ```
+
+5. **Setup Mode AP** (lines 15-16):
+   ```cpp
+   #define AP_SSID "CelsiusClock"
+   #define AP_PASSWORD "12345678"
    ```
 
 ## Pin Configuration
@@ -105,9 +138,10 @@ Before uploading the code, configure the following:
    - Adafruit SSD1306
    - Adafruit SHT31
    - NTPClient
-3. Configure WiFi credentials and timezone in the code
+3. (Optional) Adjust timezone and other settings in the code if needed
 4. Upload the sketch to your ESP32-C3
 5. Connect the hardware according to the pin configuration
+6. On first boot, the device will enter setup mode automatically - configure WiFi via web interface (see WiFi Setup section above)
 
 ## Display Layout
 
@@ -118,9 +152,10 @@ Before uploading the code, configure the following:
 
 ## Notes
 
-- The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
+- **WiFi Configuration**: The device automatically enters setup mode if WiFi credentials are missing or if WiFi network becomes unavailable. In setup mode, the device creates an access point (`CelsiusClock`) and runs a web server for configuration. The device does not attempt NTP synchronization until WiFi is properly configured and available.
+- **Time Storage**: The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
 - **Time Drift Correction**: The device automatically measures and compensates for RTC drift between NTP synchronizations. After the second sync (typically 4+ days after first sync), the drift rate is calculated and applied continuously. This compensates for typical ESP32-C3 RTC drift (e.g., ~3 minutes per day) without requiring more frequent WiFi syncs.
-- If WiFi is unavailable at boot, the firmware retries every minute until time is obtained, then returns to low duty cycle.
+- **Setup Mode**: When in setup mode, the device runs at maximum CPU frequency (160 MHz) and does not enter deep sleep. After WiFi is configured and saved, the device reboots and returns to normal operation with deep sleep.
 - Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
 - Status codes are disabled by default; enable `SHOW_DEBUG_CODES` for quick troubleshooting directly on the OLED.
 

@@ -8,9 +8,14 @@
 #include <NTPClient.h>
 #include <esp_sleep.h>
 #include <driver/adc.h>
+#include <WebServer.h>
+#include <EEPROM.h>
 
-#define WIFI_SSID "WiFi_SSID"
-#define WIFI_PASSWORD "WiFi_Password"
+#define AP_SSID "CelsiusClock"
+#define AP_PASSWORD "12345678"
+#define EEPROM_SIZE 128
+#define EEPROM_SSID_ADDR 0
+#define EEPROM_PASS_ADDR 64
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
@@ -36,20 +41,29 @@
 #define SHOW_DEBUG_CODES 0
 
 // ---------- коды сообщений ----------
-#define CODE_WIFI_CONNECT "A1"    // подключение к Wi-Fi
-#define CODE_WIFI_FAIL "A2"       // Wi-Fi недоступен
-#define CODE_NTP_SYNC "B1"        // процесс синхронизации NTP
-#define CODE_NTP_OK "B2"          // время успешно синхронизировано
-#define CODE_NTP_ERROR "B3"       // ошибка NTP
-#define CODE_SENSOR_OK "C1"       // датчик SHT31 найден
-#define CODE_SENSOR_MISSING "C2"  // датчик SHT31 отсутствует
-#define CODE_FIRST_SYNC "D1"      // первая синхронизация
-#define CODE_SETUP_DONE "D2"      // завершение setup
-#define CODE_MEASURE_INFO "E1"    // минутное измерение батареи
+#define CODE_WIFI_CONNECT "A1"     // подключение к Wi-Fi
+#define CODE_WIFI_FAIL "A2"        // Wi-Fi недоступен
+#define CODE_NTP_SYNC "B1"         // процесс синхронизации NTP
+#define CODE_NTP_OK "B2"           // время успешно синхронизировано
+#define CODE_NTP_ERROR "B3"        // ошибка NTP
+#define CODE_SENSOR_OK "C1"        // датчик SHT31 найден
+#define CODE_SENSOR_MISSING "C2"   // датчик SHT31 отсутствует
+#define CODE_FIRST_SYNC "D1"       // первая синхронизация
+#define CODE_SETUP_DONE "D2"       // завершение setup
+#define CODE_MEASURE_INFO "E1"     // минутное измерение батареи
+#define CODE_CONFIG_MODE "F1"      // режим настройки активирован
+#define CODE_CONFIG_AP_START "F2"  // точка доступа запущена
+#define CODE_CONFIG_SAVED "F3"     // настройки сохранены
+#define CODE_CPU_FREQ "G1"         // частота процессора
+#define CODE_WIFI_CONFIG_OK "H1"   // настройки WiFi найдены
+#define CODE_WIFI_CONFIG_MISS "H2"  // настройки WiFi не найдены
+#define CODE_WIFI_CONFIG_ERR "H3"   // ошибка чтения настроек
+#define CODE_CONFIG_RESET "I1"      // сброс настроек
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 WiFiUDP ntpUDP;
+WebServer server(80);
 const char *ntpServers[] = {
   "time2.google.com",
   "ntp1.vniiftri.ru",
@@ -81,6 +95,10 @@ RTC_DATA_ATTR bool displayBackupValid = false;
 RTC_DATA_ATTR int32_t driftCorrectionMs = 0;
 RTC_DATA_ATTR time_t lastSyncLocalEpoch = 0;
 
+static char wifiSSID[64] = "";
+static char wifiPassword[64] = "";
+static bool configMode = false;
+
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
@@ -110,12 +128,243 @@ time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
   return baseEpoch + (time_t)correctionSeconds;
 }
 
+void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
+  if (!SHOW_DEBUG_CODES) {
+    return;
+  }
+  setDisplayState(true);
+  setBrightness(0x01);
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(code);
+  if (detail != nullptr) {
+    display.setTextSize(1);
+    display.setCursor(0, 24);
+    display.print(detail);
+  }
+  display.display();
+  if (holdMs > 0) {
+    delay(holdMs);
+  }
+}
+
+
+// ---------- EEPROM функции ----------
+void loadWiFiConfig() {
+  EEPROM.begin(EEPROM_SIZE);
+  wifiSSID[0] = '\0';
+  wifiPassword[0] = '\0';
+  
+  // Читаем SSID
+  for (int i = 0; i < 63; i++) {
+    char c = (char)EEPROM.read(EEPROM_SSID_ADDR + i);
+    wifiSSID[i] = c;
+    if (c == '\0') break;
+  }
+  wifiSSID[63] = '\0';
+  
+  // Читаем пароль
+  for (int i = 0; i < 63; i++) {
+    char c = (char)EEPROM.read(EEPROM_PASS_ADDR + i);
+    wifiPassword[i] = c;
+    if (c == '\0') break;
+  }
+  wifiPassword[63] = '\0';
+  
+  EEPROM.end();
+}
+
+void saveWiFiConfig(const char *ssid, const char *password) {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < 63; i++) {
+    EEPROM.write(EEPROM_SSID_ADDR + i, ssid[i]);
+    if (ssid[i] == '\0') break;
+  }
+  EEPROM.write(EEPROM_SSID_ADDR + 63, '\0');
+  for (int i = 0; i < 63; i++) {
+    EEPROM.write(EEPROM_PASS_ADDR + i, password[i]);
+    if (password[i] == '\0') break;
+  }
+  EEPROM.write(EEPROM_PASS_ADDR + 63, '\0');
+  EEPROM.commit();
+  EEPROM.end();
+}
+
+bool hasWiFiConfig() {
+  loadWiFiConfig();
+  // Проверяем, что SSID не пустой и имеет разумную длину (1-32 символа для SSID)
+  size_t ssidLen = strlen(wifiSSID);
+  return (ssidLen > 0 && ssidLen < 33);
+}
+
+void clearWiFiConfig() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < 64; i++) {
+    EEPROM.write(EEPROM_SSID_ADDR + i, 0);
+    EEPROM.write(EEPROM_PASS_ADDR + i, 0);
+  }
+  EEPROM.commit();
+  EEPROM.end();
+  wifiSSID[0] = '\0';
+  wifiPassword[0] = '\0';
+}
+
+// ---------- веб-сервер функции ----------
+String getConfigPage() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Celsius Clock - Setup</title>";
+  html += "<style>";
+  html += "body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }";
+  html += ".container { max-width: 400px; margin: 0 auto; background: #2a2a2a; padding: 20px; border-radius: 10px; }";
+  html += "h1 { text-align: center; color: #4CAF50; }";
+  html += "input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box; }";
+  html += "button { width: 100%; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }";
+  html += "button:hover { background: #45a049; }";
+  html += "label { display: block; margin-top: 10px; }";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<h1>Celsius Clock Setup</h1>";
+  html += "<form method='POST' action='/save'>";
+  html += "<label>WiFi SSID:</label>";
+  html += "<input type='text' name='ssid' value='" + String(wifiSSID) + "' required>";
+  html += "<label>WiFi Password:</label>";
+  html += "<input type='password' name='password' value='" + String(wifiPassword) + "' required>";
+  html += "<button type='submit'>Save and Reset</button>";
+  html += "</form>";
+  html += "<hr style='margin: 20px 0; border-color: #555;'>";
+  html += "<form method='POST' action='/reset' style='margin-top: 20px;'>";
+  html += "<button type='submit' style='background: #f44336;'>Reset Settings</button>";
+  html += "</form>";
+  html += "</div></body></html>";
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", getConfigPage());
+}
+
+void handleReset() {
+  clearWiFiConfig();
+  logToDisplay(CODE_CONFIG_RESET);
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Settings reset</title>";
+  html += "<style>body { font-family: Arial; text-align: center; margin-top: 50px; background: #1a1a1a; color: #fff; }";
+  html += ".message { background: #2a2a2a; padding: 20px; border-radius: 10px; max-width: 400px; margin: 0 auto; }";
+  html += "h1 { color: #f44336; }</style></head><body>";
+  html += "<div class='message'><h1>Settings Reset!</h1>";
+  html += "<p>Resetting...</p></div></body></html>";
+  server.send(200, "text/html", html);
+  
+  delay(2000);
+  ESP.restart();
+}
+
+void handleSave() {
+  if (server.hasArg("ssid") && server.hasArg("password")) {
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+
+    // Обрезаем пробелы
+    ssid.trim();
+    password.trim();
+    
+    if (ssid.length() == 0 || ssid.length() >= 64 || password.length() >= 64) {
+      server.send(400, "text/plain", "Error: Invalid SSID or password length");
+      return;
+    }
+
+    ssid.toCharArray(wifiSSID, 64);
+    password.toCharArray(wifiPassword, 64);
+    
+    // Убеждаемся, что строки заканчиваются нулем
+    wifiSSID[63] = '\0';
+    wifiPassword[63] = '\0';
+    
+    saveWiFiConfig(wifiSSID, wifiPassword);
+    
+    // Проверяем, что настройки сохранились
+    loadWiFiConfig();
+    
+    if (strlen(wifiSSID) == 0 || strcmp(wifiSSID, ssid.c_str()) != 0) {
+      char detail[32];
+      snprintf(detail, sizeof(detail), "len=%d", strlen(wifiSSID));
+      logToDisplay(CODE_WIFI_CONFIG_ERR, detail);
+      server.send(500, "text/plain", "Error: Failed to save settings");
+      delay(2000);
+      return;
+    }
+    
+    logToDisplay(CODE_CONFIG_SAVED);
+
+    String html = "<!DOCTYPE html><html><head>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<title>Settings saved</title>";
+    html += "<style>body { font-family: Arial; text-align: center; margin-top: 50px; background: #1a1a1a; color: #fff; }";
+    html += ".message { background: #2a2a2a; padding: 20px; border-radius: 10px; max-width: 400px; margin: 0 auto; }";
+    html += "h1 { color: #4CAF50; }</style></head><body>";
+    html += "<div class='message'><h1>Saved!</h1>";
+    html += "<p>Resetting...</p></div></body></html>";
+    server.send(200, "text/html", html);
+
+    // Увеличиваем задержку перед перезагрузкой, чтобы EEPROM.commit() точно завершился
+    delay(2000);
+    ESP.restart();
+  } else {
+    server.send(400, "text/plain", "Error: SSID or password missed");
+  }
+}
+
+void updateConfigModeDisplay() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Setup mode");
+  display.setCursor(0, 32);
+  display.print("SSID: ");
+  display.println(AP_SSID);
+  display.setCursor(0, 64);
+  display.print("IP: ");
+  display.println(WiFi.softAPIP());
+  display.display();
+}
+
+void startConfigMode() {
+  logToDisplay(CODE_CONFIG_MODE);
+  configMode = true;
+  setCpuMaxPerformance();
+
+  char detail[32];
+  snprintf(detail, sizeof(detail), "%d MHz", getCpuFrequencyMhz());
+  logToDisplay(CODE_CPU_FREQ, detail);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  snprintf(detail, sizeof(detail), "%s", WiFi.softAPIP().toString().c_str());
+  logToDisplay(CODE_CONFIG_AP_START, detail);
+
+  server.on("/", handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/reset", HTTP_POST, handleReset);
+  server.begin();
+
+  updateConfigModeDisplay();
+}
+
 void setCpuLowPower() {
   setCpuFrequencyMhz(40);
 }
 
 void setCpuPerformance() {
   setCpuFrequencyMhz(80);
+}
+
+void setCpuMaxPerformance() {
+  setCpuFrequencyMhz(160);
 }
 
 void setDisplayState(bool on) {
@@ -272,27 +521,6 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   displayBackupValid = true;
 }
 
-void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
-  if (!SHOW_DEBUG_CODES) {
-    return;
-  }
-  setDisplayState(true);
-  setBrightness(0x01);
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(code);
-  if (detail != nullptr) {
-    display.setTextSize(1);
-    display.setCursor(0, 24);
-    display.print(detail);
-  }
-  display.display();
-  if (holdMs > 0) {
-    delay(holdMs);
-  }
-}
-
 bool ntpSync() {
   logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
   setCpuPerformance();
@@ -301,7 +529,7 @@ bool ntpSync() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(wifiSSID, wifiPassword);
 
   unsigned long startAttempt = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
@@ -321,7 +549,7 @@ bool ntpSync() {
   if (ok) {
     time_t ntpEpoch = timeClient.getEpochTime();
     time_t localRawEpoch = storedEpoch;
-    
+
     if (lastSyncEpoch > 0 && lastSyncLocalEpoch > 0 && localRawEpoch > lastSyncLocalEpoch) {
       time_t ntpElapsed = ntpEpoch - lastSyncEpoch;
       time_t localElapsed = localRawEpoch - lastSyncLocalEpoch;
@@ -330,7 +558,7 @@ bool ntpSync() {
         driftCorrectionMs = (int32_t)driftMs;
       }
     }
-    
+
     lastSyncEpoch = ntpEpoch;
     lastSyncLocalEpoch = ntpEpoch;
     storedEpoch = ntpEpoch;
@@ -466,9 +694,21 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("Setup started");
   setCpuLowPower();
   delay(100);
+  
+  // Проверка сброса настроек: если LED_PIN (GPIO 0) замкнут на землю при старте
+  pinMode(LED_PIN, INPUT_PULLUP);
+  delay(50);
+  if (digitalRead(LED_PIN) == LOW) {
+    // GPIO замкнут на землю - сбрасываем настройки
+    clearWiFiConfig();
+    logToDisplay(CODE_CONFIG_RESET, "GPIO reset");
+    delay(2000);
+  }
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   pinMode(BAT_PIN, INPUT);
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -495,16 +735,40 @@ void setup() {
   }
 
   sensorOK = sht31.begin(SHT31_ADDR);
-
   logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
+  // Проверка настроек WiFi
+  if (!hasWiFiConfig()) {
+    char detail[32];
+    snprintf(detail, sizeof(detail), "len=%d", strlen(wifiSSID));
+    logToDisplay(CODE_WIFI_CONFIG_MISS, detail);
+    // Режим настройки - запускаем веб-сервер
+    startConfigMode();
+    return;  // Не переходим в обычный режим
+  }
+  
+  char detail[32];
+  snprintf(detail, sizeof(detail), "%s", wifiSSID);
+  logToDisplay(CODE_WIFI_CONFIG_OK, detail);
+  
+  // Настройки есть - продолжаем в обычном режиме
+  // WiFi подключение будет происходить при необходимости (синхронизация NTP)
+  // Не переходим в режим настройки, даже если WiFi временно недоступен
+
+  // Обычный режим работы
   uint32_t sleepSeconds = runCycle();
   enterDeepSleep(sleepSeconds);
 }
 
 void loop() {
-  // Не используется: устройство просыпается из deep sleep и сразу выполняет setup()
+  if (configMode) {
+    // Обработка запросов веб-сервера в режиме настройки
+    server.handleClient();
+    delay(10);
+  } else {
+    // Не используется: устройство просыпается из deep sleep и сразу выполняет setup()
+  }
 }
