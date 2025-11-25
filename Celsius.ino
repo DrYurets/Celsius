@@ -13,9 +13,10 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define EEPROM_SIZE 128
+#define EEPROM_SIZE 256
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
+#define EEPROM_SETTINGS_ADDR 128
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
@@ -99,17 +100,48 @@ static char wifiSSID[64] = "";
 static char wifiPassword[64] = "";
 static bool configMode = false;
 
+// Структура настроек устройства
+struct DeviceSettings {
+  bool showDebugCodes;
+  bool showDate;
+  bool showWeekday;
+  bool timeFormat24h;
+  bool hourlyBlink;
+  uint8_t nightStartH;
+  uint8_t nightStartM;
+  uint8_t nightEndH;
+  uint8_t nightEndM;
+  bool weekdayLanguageRu;  // true = Russian, false = English
+};
+
+static DeviceSettings settings = {
+  .showDebugCodes = false,
+  .showDate = true,
+  .showWeekday = true,
+  .timeFormat24h = true,
+  .hourlyBlink = true,
+  .nightStartH = 23,
+  .nightStartM = 0,
+  .nightEndH = 7,
+  .nightEndM = 0,
+  .weekdayLanguageRu = true
+};
+
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
 static bool displayOn = true;
 
 // ---------- утилиты ----------
-bool isNight(int h) {
-  if (NIGHT_START_H < NIGHT_END_H) {
-    return h >= NIGHT_START_H && h < NIGHT_END_H;
+bool isNight(int h, int m = 0) {
+  int startMinutes = settings.nightStartH * 60 + settings.nightStartM;
+  int endMinutes = settings.nightEndH * 60 + settings.nightEndM;
+  int currentMinutes = h * 60 + m;
+  
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
   }
-  return h >= NIGHT_START_H || h < NIGHT_END_H;
+  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
 }
 
 bool hasValidTime(time_t epoch) {
@@ -129,7 +161,7 @@ time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
 }
 
 void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
-  if (!SHOW_DEBUG_CODES) {
+  if (!settings.showDebugCodes) {
     return;
   }
   setDisplayState(true);
@@ -210,6 +242,41 @@ void clearWiFiConfig() {
   wifiPassword[0] = '\0';
 }
 
+void loadSettings() {
+  EEPROM.begin(EEPROM_SIZE);
+  uint8_t *data = (uint8_t*)&settings;
+  for (size_t i = 0; i < sizeof(DeviceSettings); i++) {
+    data[i] = EEPROM.read(EEPROM_SETTINGS_ADDR + i);
+  }
+  EEPROM.end();
+  
+  // Проверка валидности (магическое число)
+  if (settings.nightStartH > 23 || settings.nightEndH > 23 || 
+      settings.nightStartM > 59 || settings.nightEndM > 59) {
+    // Настройки невалидны, используем значения по умолчанию
+    settings.showDebugCodes = false;
+    settings.showDate = true;
+    settings.showWeekday = true;
+    settings.timeFormat24h = true;
+    settings.hourlyBlink = true;
+    settings.nightStartH = 23;
+    settings.nightStartM = 0;
+    settings.nightEndH = 7;
+    settings.nightEndM = 0;
+    settings.weekdayLanguageRu = true;
+  }
+}
+
+void saveSettings() {
+  EEPROM.begin(EEPROM_SIZE);
+  uint8_t *data = (uint8_t*)&settings;
+  for (size_t i = 0; i < sizeof(DeviceSettings); i++) {
+    EEPROM.write(EEPROM_SETTINGS_ADDR + i, data[i]);
+  }
+  EEPROM.commit();
+  EEPROM.end();
+}
+
 // ---------- веб-сервер функции ----------
 String getConfigPage() {
   String html = "<!DOCTYPE html><html><head>";
@@ -219,19 +286,47 @@ String getConfigPage() {
   html += "body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }";
   html += ".container { max-width: 400px; margin: 0 auto; background: #2a2a2a; padding: 20px; border-radius: 10px; }";
   html += "h1 { text-align: center; color: #4CAF50; }";
-  html += "input[type=text], input[type=password] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box; }";
+  html += "input[type=text], input[type=password], input[type=number] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box; }";
+  html += "input[type=checkbox] { width: 20px; height: 20px; margin-right: 10px; }";
   html += "button { width: 100%; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }";
   html += "button:hover { background: #45a049; }";
   html += "label { display: block; margin-top: 10px; }";
+  html += ".checkbox-label { display: flex; align-items: center; margin: 10px 0; }";
+  html += ".time-group { display: flex; gap: 10px; }";
+  html += ".time-group input { width: 48%; }";
+  html += "h2 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; font-size: 18px; }";
   html += "</style></head><body>";
   html += "<div class='container'>";
   html += "<h1>Celsius Clock Setup</h1>";
   html += "<form method='POST' action='/save'>";
+  
+  html += "<h2>WiFi Settings</h2>";
   html += "<label>WiFi SSID:</label>";
   html += "<input type='text' name='ssid' value='" + String(wifiSSID) + "' required>";
   html += "<label>WiFi Password:</label>";
   html += "<input type='password' name='password' value='" + String(wifiPassword) + "' required>";
-  html += "<button type='submit'>Save and Reset</button>";
+  
+  html += "<h2>Display Settings</h2>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='showDebugCodes' " + String(settings.showDebugCodes ? "checked" : "") + "><label>Show debug codes</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='showDate' " + String(settings.showDate ? "checked" : "") + "><label>Show date</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='showWeekday' " + String(settings.showWeekday ? "checked" : "") + "><label>Show weekday</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='timeFormat24h' " + String(settings.timeFormat24h ? "checked" : "") + "><label>24-hour format</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBlink' " + String(settings.hourlyBlink ? "checked" : "") + "><label>Hourly LED blink</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='weekdayLanguageRu' " + String(settings.weekdayLanguageRu ? "checked" : "") + "><label>Weekday in Russian</label></div>";
+  
+  html += "<h2>Night Mode</h2>";
+  html += "<label>Night start time:</label>";
+  html += "<div class='time-group'>";
+  html += "<input type='number' name='nightStartH' min='0' max='23' value='" + String(settings.nightStartH) + "' required>";
+  html += "<input type='number' name='nightStartM' min='0' max='59' value='" + String(settings.nightStartM) + "' required>";
+  html += "</div>";
+  html += "<label>Night end time:</label>";
+  html += "<div class='time-group'>";
+  html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
+  html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
+  html += "</div>";
+  
+  html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
   html += "<form method='POST' action='/reset' style='margin-top: 20px;'>";
@@ -284,7 +379,34 @@ void handleSave() {
     wifiSSID[63] = '\0';
     wifiPassword[63] = '\0';
     
+    // Обработка настроек устройства
+    settings.showDebugCodes = server.hasArg("showDebugCodes");
+    settings.showDate = server.hasArg("showDate");
+    settings.showWeekday = server.hasArg("showWeekday");
+    settings.timeFormat24h = server.hasArg("timeFormat24h");
+    settings.hourlyBlink = server.hasArg("hourlyBlink");
+    settings.weekdayLanguageRu = server.hasArg("weekdayLanguageRu");
+    
+    if (server.hasArg("nightStartH")) {
+      int h = server.arg("nightStartH").toInt();
+      int m = server.arg("nightStartM").toInt();
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+        settings.nightStartH = h;
+        settings.nightStartM = m;
+      }
+    }
+    
+    if (server.hasArg("nightEndH")) {
+      int h = server.arg("nightEndH").toInt();
+      int m = server.arg("nightEndM").toInt();
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+        settings.nightEndH = h;
+        settings.nightEndM = m;
+      }
+    }
+    
     saveWiFiConfig(wifiSSID, wifiPassword);
+    saveSettings();
     
     // Проверяем, что настройки сохранились
     loadWiFiConfig();
@@ -437,39 +559,47 @@ const uint8_t font5x8[][8] = {
 void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
   wday = wday % 7;
 
-  switch (wday) {
-    case 1:                                                       // ПН
-      display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
-      display.setCursor(x + 10, y);
-      display.print("H");
-      break;
-    case 2:  // ВТ
-      display.setCursor(x + 4, y);
-      display.print("BT");
-      break;
-    case 3:  // CP
-      display.setCursor(x + 4, y);
-      display.print("CP");
-      break;
-    case 4:  // ЧТ
-      display.drawBitmap(x, y, font5x8[1], 8, 8, SSD1306_WHITE);
-      display.setCursor(x + 10, y);
-      display.print("T");
-      break;
-    case 5:                                                       // ПТ - ok
-      display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
-      display.setCursor(x + 10, y);
-      display.print("T");
-      break;
-    case 6:  // СБ
-      display.setCursor(x + 4, y);
-      display.print("C");
-      display.drawBitmap(x + 6, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
-      break;
-    case 0:  // ВС
-      display.setCursor(x + 4, y);
-      display.print("BC");
-      break;
+  if (settings.weekdayLanguageRu) {
+    // Русский язык
+    switch (wday) {
+      case 1:                                                       // ПН
+        display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
+        display.setCursor(x + 10, y);
+        display.print("H");
+        break;
+      case 2:  // ВТ
+        display.setCursor(x + 4, y);
+        display.print("BT");
+        break;
+      case 3:  // CP
+        display.setCursor(x + 4, y);
+        display.print("CP");
+        break;
+      case 4:  // ЧТ
+        display.drawBitmap(x, y, font5x8[1], 8, 8, SSD1306_WHITE);
+        display.setCursor(x + 10, y);
+        display.print("T");
+        break;
+      case 5:                                                       // ПТ
+        display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
+        display.setCursor(x + 10, y);
+        display.print("T");
+        break;
+      case 6:  // СБ
+        display.setCursor(x + 4, y);
+        display.print("C");
+        display.drawBitmap(x + 6, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
+        break;
+      case 0:  // ВС
+        display.setCursor(x + 4, y);
+        display.print("BC");
+        break;
+    }
+  } else {
+    // Английский язык
+    const char* days[] = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
+    display.setCursor(x + 4, y);
+    display.print(days[wday]);
   }
 }
 
@@ -493,17 +623,33 @@ void drawBattery(uint8_t bars) {
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.clearDisplay();
   drawBattery(batBars);
-  display.setTextSize(1);
-  display.setCursor(0, 8);
-  display.printf("%02d.%02d", d, mo);
+  
+  int yPos = 8;
+  
+  if (settings.showDate) {
+    display.setTextSize(1);
+    display.setCursor(0, yPos);
+    display.printf("%02d.%02d", d, mo);
+    yPos += 14;
+  }
 
-  drawDayShort(wday, 6, 22);
+  if (settings.showWeekday) {
+    drawDayShort(wday, 6, yPos);
+    yPos += 14;
+  }
 
   display.drawLine(0, 36, 128, 36, SSD1306_WHITE);
 
+  // Формат времени
+  int displayH = h;
+  if (!settings.timeFormat24h) {
+    displayH = h % 12;
+    if (displayH == 0) displayH = 12;
+  }
+
   display.setTextSize(2);
   display.setCursor(5, 48);
-  display.printf("%02d", h);
+  display.printf("%02d", displayH);
   display.setCursor(5, 73);
   display.printf("%02d", m);
 
@@ -648,7 +794,7 @@ uint32_t runCycle() {
   logToDisplay(CODE_MEASURE_INFO, detail, 400);
 #endif
 
-  bool night = timeValid && isNight(ti.tm_hour);
+  bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
 
   if (!timeValid) {
     logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
@@ -662,7 +808,7 @@ uint32_t runCycle() {
     setDisplayState(false);
   }
 
-  if (timeValid && (ti.tm_min == 0) && !night) {
+  if (timeValid && (ti.tm_min == 0) && !night && settings.hourlyBlink) {
     digitalWrite(LED_PIN, HIGH);
     delay(80);
     digitalWrite(LED_PIN, LOW);
@@ -739,6 +885,9 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  // Загрузка настроек устройства
+  loadSettings();
 
   // Проверка настроек WiFi
   if (!hasWiFiConfig()) {
