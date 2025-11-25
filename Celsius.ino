@@ -840,20 +840,28 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 
 void setup() {
   Serial.begin(9600);
+  
+  // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  
   setCpuLowPower();
   delay(100);
   
   // Проверка сброса настроек: если LED_PIN (GPIO 0) замкнут на землю при старте
+  // Кратковременно переключаем на вход для проверки
   pinMode(LED_PIN, INPUT_PULLUP);
-  delay(50);
-  if (digitalRead(LED_PIN) == LOW) {
-    // GPIO замкнут на землю - сбрасываем настройки
+  delayMicroseconds(100);  // Минимальная задержка для стабилизации
+  bool resetRequested = (digitalRead(LED_PIN) == LOW);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  
+  if (resetRequested) {
+    // GPIO был замкнут на землю - сбрасываем настройки
     clearWiFiConfig();
     logToDisplay(CODE_CONFIG_RESET, "GPIO reset");
     delay(2000);
   }
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
   
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   pinMode(BAT_PIN, INPUT);
