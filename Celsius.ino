@@ -112,6 +112,7 @@ struct DeviceSettings {
   uint8_t nightEndH;
   uint8_t nightEndM;
   bool weekdayLanguageRu;  // true = Russian, false = English
+  int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
 };
 
 static DeviceSettings settings = {
@@ -124,7 +125,8 @@ static DeviceSettings settings = {
   .nightStartM = 0,
   .nightEndH = 7,
   .nightEndM = 0,
-  .weekdayLanguageRu = true
+  .weekdayLanguageRu = true,
+  .timeCorrectionPerDay = 0
 };
 
 static bool sensorOK = false;
@@ -157,6 +159,20 @@ time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
     return baseEpoch;
   }
   int64_t correctionSeconds = ((int64_t)elapsed * driftCorrectionMs) / 1000000LL;
+  return baseEpoch + (time_t)correctionSeconds;
+}
+
+time_t applyTimeCorrection(time_t baseEpoch, time_t referenceEpoch) {
+  if (settings.timeCorrectionPerDay == 0 || referenceEpoch == 0) {
+    return baseEpoch;
+  }
+  time_t elapsed = baseEpoch - referenceEpoch;
+  if (elapsed <= 0) {
+    return baseEpoch;
+  }
+  // Применяем коррекцию: за каждую секунду реального времени добавляем/вычитаем
+  // timeCorrectionPerDay / 86400 секунд
+  int64_t correctionSeconds = ((int64_t)elapsed * (int64_t)settings.timeCorrectionPerDay) / 86400LL;
   return baseEpoch + (time_t)correctionSeconds;
 }
 
@@ -264,6 +280,7 @@ void loadSettings() {
     settings.nightEndH = 7;
     settings.nightEndM = 0;
     settings.weekdayLanguageRu = true;
+    settings.timeCorrectionPerDay = 0;
   }
 }
 
@@ -325,6 +342,11 @@ String getConfigPage() {
   html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
   html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
   html += "</div>";
+  
+  html += "<h2>Time Correction</h2>";
+  html += "<label>Time correction (seconds per day):</label>";
+  html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
   
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
@@ -402,6 +424,14 @@ void handleSave() {
       if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
         settings.nightEndH = h;
         settings.nightEndM = m;
+      }
+    }
+    
+    if (server.hasArg("timeCorrectionPerDay")) {
+      int32_t correction = server.arg("timeCorrectionPerDay").toInt();
+      // Ограничиваем разумными пределами: от -3600 до +3600 секунд в сутки
+      if (correction >= -3600 && correction <= 3600) {
+        settings.timeCorrectionPerDay = correction;
       }
     }
     
@@ -722,6 +752,7 @@ bool ntpSync() {
 uint32_t runCycle() {
   uint32_t cycleStartMs = millis();
   time_t local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
+  local = applyTimeCorrection(local, lastSyncLocalEpoch);
   bool timeValid = hasValidTime(local);
   struct tm ti = {};
   if (timeValid) {
@@ -739,6 +770,7 @@ uint32_t runCycle() {
     }
     if (ntpSync()) {
       local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
+      local = applyTimeCorrection(local, lastSyncLocalEpoch);
       timeValid = hasValidTime(local);
       if (timeValid) {
         localtime_r(&local, &ti);
@@ -822,7 +854,16 @@ uint32_t runCycle() {
     }
     sleepSeconds = (uint32_t)secToNextMinute;
     uint32_t activeSeconds = ((millis() - cycleStartMs) + 500) / 1000;
-    storedEpoch = storedEpoch + activeSeconds + sleepSeconds;
+    uint32_t elapsedSeconds = activeSeconds + sleepSeconds;
+    
+    // Применяем коррекцию времени к storedEpoch
+    if (settings.timeCorrectionPerDay != 0 && lastSyncLocalEpoch > 0) {
+      // Вычисляем коррекцию для прошедшего времени
+      int64_t correctionSeconds = ((int64_t)elapsedSeconds * (int64_t)settings.timeCorrectionPerDay) / 86400LL;
+      storedEpoch = storedEpoch + elapsedSeconds + (time_t)correctionSeconds;
+    } else {
+      storedEpoch = storedEpoch + elapsedSeconds;
+    }
   } else {
     sleepSeconds = 30;
   }
