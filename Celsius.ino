@@ -42,21 +42,21 @@
 #define SHOW_DEBUG_CODES 0
 
 // ---------- коды сообщений ----------
-#define CODE_WIFI_CONNECT "A1"     // подключение к Wi-Fi
-#define CODE_WIFI_FAIL "A2"        // Wi-Fi недоступен
-#define CODE_NTP_SYNC "B1"         // процесс синхронизации NTP
-#define CODE_NTP_OK "B2"           // время успешно синхронизировано
-#define CODE_NTP_ERROR "B3"        // ошибка NTP
-#define CODE_SENSOR_OK "C1"        // датчик SHT31 найден
-#define CODE_SENSOR_MISSING "C2"   // датчик SHT31 отсутствует
-#define CODE_FIRST_SYNC "D1"       // первая синхронизация
-#define CODE_SETUP_DONE "D2"       // завершение setup
-#define CODE_MEASURE_INFO "E1"     // минутное измерение батареи
-#define CODE_CONFIG_MODE "F1"      // режим настройки активирован
-#define CODE_CONFIG_AP_START "F2"  // точка доступа запущена
-#define CODE_CONFIG_SAVED "F3"     // настройки сохранены
-#define CODE_CPU_FREQ "G1"         // частота процессора
-#define CODE_WIFI_CONFIG_OK "H1"   // настройки WiFi найдены
+#define CODE_WIFI_CONNECT "A1"      // подключение к Wi-Fi
+#define CODE_WIFI_FAIL "A2"         // Wi-Fi недоступен
+#define CODE_NTP_SYNC "B1"          // процесс синхронизации NTP
+#define CODE_NTP_OK "B2"            // время успешно синхронизировано
+#define CODE_NTP_ERROR "B3"         // ошибка NTP
+#define CODE_SENSOR_OK "C1"         // датчик SHT31 найден
+#define CODE_SENSOR_MISSING "C2"    // датчик SHT31 отсутствует
+#define CODE_FIRST_SYNC "D1"        // первая синхронизация
+#define CODE_SETUP_DONE "D2"        // завершение setup
+#define CODE_MEASURE_INFO "E1"      // минутное измерение батареи
+#define CODE_CONFIG_MODE "F1"       // режим настройки активирован
+#define CODE_CONFIG_AP_START "F2"   // точка доступа запущена
+#define CODE_CONFIG_SAVED "F3"      // настройки сохранены
+#define CODE_CPU_FREQ "G1"          // частота процессора
+#define CODE_WIFI_CONFIG_OK "H1"    // настройки WiFi найдены
 #define CODE_WIFI_CONFIG_MISS "H2"  // настройки WiFi не найдены
 #define CODE_WIFI_CONFIG_ERR "H3"   // ошибка чтения настроек
 #define CODE_CONFIG_RESET "I1"      // сброс настроек
@@ -111,7 +111,7 @@ struct DeviceSettings {
   uint8_t nightStartM;
   uint8_t nightEndH;
   uint8_t nightEndM;
-  bool weekdayLanguageRu;  // true = Russian, false = English
+  bool weekdayLanguageRu;        // true = Russian, false = English
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
 };
 
@@ -139,7 +139,7 @@ bool isNight(int h, int m = 0) {
   int startMinutes = settings.nightStartH * 60 + settings.nightStartM;
   int endMinutes = settings.nightEndH * 60 + settings.nightEndM;
   int currentMinutes = h * 60 + m;
-  
+
   if (startMinutes < endMinutes) {
     return currentMinutes >= startMinutes && currentMinutes < endMinutes;
   }
@@ -203,7 +203,7 @@ void loadWiFiConfig() {
   EEPROM.begin(EEPROM_SIZE);
   wifiSSID[0] = '\0';
   wifiPassword[0] = '\0';
-  
+
   // Читаем SSID
   for (int i = 0; i < 63; i++) {
     char c = (char)EEPROM.read(EEPROM_SSID_ADDR + i);
@@ -211,7 +211,7 @@ void loadWiFiConfig() {
     if (c == '\0') break;
   }
   wifiSSID[63] = '\0';
-  
+
   // Читаем пароль
   for (int i = 0; i < 63; i++) {
     char c = (char)EEPROM.read(EEPROM_PASS_ADDR + i);
@@ -219,7 +219,7 @@ void loadWiFiConfig() {
     if (c == '\0') break;
   }
   wifiPassword[63] = '\0';
-  
+
   EEPROM.end();
 }
 
@@ -260,15 +260,14 @@ void clearWiFiConfig() {
 
 void loadSettings() {
   EEPROM.begin(EEPROM_SIZE);
-  uint8_t *data = (uint8_t*)&settings;
+  uint8_t *data = (uint8_t *)&settings;
   for (size_t i = 0; i < sizeof(DeviceSettings); i++) {
     data[i] = EEPROM.read(EEPROM_SETTINGS_ADDR + i);
   }
   EEPROM.end();
-  
+
   // Проверка валидности (магическое число)
-  if (settings.nightStartH > 23 || settings.nightEndH > 23 || 
-      settings.nightStartM > 59 || settings.nightEndM > 59) {
+  if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59) {
     // Настройки невалидны, используем значения по умолчанию
     settings.showDebugCodes = false;
     settings.showDate = true;
@@ -286,7 +285,7 @@ void loadSettings() {
 
 void saveSettings() {
   EEPROM.begin(EEPROM_SIZE);
-  uint8_t *data = (uint8_t*)&settings;
+  uint8_t *data = (uint8_t *)&settings;
   for (size_t i = 0; i < sizeof(DeviceSettings); i++) {
     EEPROM.write(EEPROM_SETTINGS_ADDR + i, data[i]);
   }
@@ -316,13 +315,13 @@ String getConfigPage() {
   html += "<div class='container'>";
   html += "<h1>Celsius Clock Setup</h1>";
   html += "<form method='POST' action='/save'>";
-  
+
   html += "<h2>WiFi Settings</h2>";
   html += "<label>WiFi SSID:</label>";
   html += "<input type='text' name='ssid' value='" + String(wifiSSID) + "' required>";
   html += "<label>WiFi Password:</label>";
   html += "<input type='password' name='password' value='" + String(wifiPassword) + "' required>";
-  
+
   html += "<h2>Display Settings</h2>";
   html += "<div class='checkbox-label'><input type='checkbox' name='showDebugCodes' " + String(settings.showDebugCodes ? "checked" : "") + "><label>Show debug codes</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='showDate' " + String(settings.showDate ? "checked" : "") + "><label>Show date</label></div>";
@@ -330,7 +329,7 @@ String getConfigPage() {
   html += "<div class='checkbox-label'><input type='checkbox' name='timeFormat24h' " + String(settings.timeFormat24h ? "checked" : "") + "><label>24-hour format</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBlink' " + String(settings.hourlyBlink ? "checked" : "") + "><label>Hourly LED blink</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='weekdayLanguageRu' " + String(settings.weekdayLanguageRu ? "checked" : "") + "><label>Weekday in Russian</label></div>";
-  
+
   html += "<h2>Night Mode</h2>";
   html += "<label>Night start time:</label>";
   html += "<div class='time-group'>";
@@ -342,12 +341,12 @@ String getConfigPage() {
   html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
   html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
   html += "</div>";
-  
+
   html += "<h2>Time Correction</h2>";
   html += "<label>Time correction (seconds per day):</label>";
   html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
-  
+
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
@@ -365,7 +364,7 @@ void handleRoot() {
 void handleReset() {
   clearWiFiConfig();
   logToDisplay(CODE_CONFIG_RESET);
-  
+
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<title>Settings reset</title>";
@@ -375,7 +374,7 @@ void handleReset() {
   html += "<div class='message'><h1>Settings Reset!</h1>";
   html += "<p>Resetting...</p></div></body></html>";
   server.send(200, "text/html", html);
-  
+
   delay(2000);
   ESP.restart();
 }
@@ -388,7 +387,7 @@ void handleSave() {
     // Обрезаем пробелы
     ssid.trim();
     password.trim();
-    
+
     if (ssid.length() == 0 || ssid.length() >= 64 || password.length() >= 64) {
       server.send(400, "text/plain", "Error: Invalid SSID or password length");
       return;
@@ -396,11 +395,11 @@ void handleSave() {
 
     ssid.toCharArray(wifiSSID, 64);
     password.toCharArray(wifiPassword, 64);
-    
+
     // Убеждаемся, что строки заканчиваются нулем
     wifiSSID[63] = '\0';
     wifiPassword[63] = '\0';
-    
+
     // Обработка настроек устройства
     settings.showDebugCodes = server.hasArg("showDebugCodes");
     settings.showDate = server.hasArg("showDate");
@@ -408,7 +407,7 @@ void handleSave() {
     settings.timeFormat24h = server.hasArg("timeFormat24h");
     settings.hourlyBlink = server.hasArg("hourlyBlink");
     settings.weekdayLanguageRu = server.hasArg("weekdayLanguageRu");
-    
+
     if (server.hasArg("nightStartH")) {
       int h = server.arg("nightStartH").toInt();
       int m = server.arg("nightStartM").toInt();
@@ -417,7 +416,7 @@ void handleSave() {
         settings.nightStartM = m;
       }
     }
-    
+
     if (server.hasArg("nightEndH")) {
       int h = server.arg("nightEndH").toInt();
       int m = server.arg("nightEndM").toInt();
@@ -426,7 +425,7 @@ void handleSave() {
         settings.nightEndM = m;
       }
     }
-    
+
     if (server.hasArg("timeCorrectionPerDay")) {
       int32_t correction = server.arg("timeCorrectionPerDay").toInt();
       // Ограничиваем разумными пределами: от -3600 до +3600 секунд в сутки
@@ -434,13 +433,13 @@ void handleSave() {
         settings.timeCorrectionPerDay = correction;
       }
     }
-    
+
     saveWiFiConfig(wifiSSID, wifiPassword);
     saveSettings();
-    
+
     // Проверяем, что настройки сохранились
     loadWiFiConfig();
-    
+
     if (strlen(wifiSSID) == 0 || strcmp(wifiSSID, ssid.c_str()) != 0) {
       char detail[32];
       snprintf(detail, sizeof(detail), "len=%d", strlen(wifiSSID));
@@ -449,7 +448,7 @@ void handleSave() {
       delay(2000);
       return;
     }
-    
+
     logToDisplay(CODE_CONFIG_SAVED);
 
     String html = "<!DOCTYPE html><html><head>";
@@ -618,7 +617,7 @@ void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
       case 6:  // СБ
         display.setCursor(x + 4, y);
         display.print("C");
-        display.drawBitmap(x + 6, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
+        display.drawBitmap(x + 8, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
         break;
       case 0:  // ВС
         display.setCursor(x + 4, y);
@@ -627,7 +626,7 @@ void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
     }
   } else {
     // Английский язык
-    const char* days[] = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
+    const char *days[] = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
     display.setCursor(x + 4, y);
     display.print(days[wday]);
   }
@@ -653,9 +652,9 @@ void drawBattery(uint8_t bars) {
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.clearDisplay();
   drawBattery(batBars);
-  
+
   int yPos = 8;
-  
+
   if (settings.showDate) {
     display.setTextSize(1);
     display.setCursor(0, yPos);
@@ -855,7 +854,7 @@ uint32_t runCycle() {
     sleepSeconds = (uint32_t)secToNextMinute;
     uint32_t activeSeconds = ((millis() - cycleStartMs) + 500) / 1000;
     uint32_t elapsedSeconds = activeSeconds + sleepSeconds;
-    
+
     // Применяем коррекцию времени к storedEpoch
     if (settings.timeCorrectionPerDay != 0 && lastSyncLocalEpoch > 0) {
       // Вычисляем коррекцию для прошедшего времени
@@ -881,14 +880,14 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 
 void setup() {
   Serial.begin(9600);
-  
+
   // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-  
+
   setCpuLowPower();
   delay(100);
-  
+
   // Проверка сброса настроек: если LED_PIN (GPIO 0) замкнут на землю при старте
   // Кратковременно переключаем на вход для проверки
   pinMode(LED_PIN, INPUT_PULLUP);
@@ -896,14 +895,14 @@ void setup() {
   bool resetRequested = (digitalRead(LED_PIN) == LOW);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-  
+
   if (resetRequested) {
     // GPIO был замкнут на землю - сбрасываем настройки
     clearWiFiConfig();
     logToDisplay(CODE_CONFIG_RESET, "GPIO reset");
     delay(2000);
   }
-  
+
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   pinMode(BAT_PIN, INPUT);
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -947,11 +946,11 @@ void setup() {
     startConfigMode();
     return;  // Не переходим в обычный режим
   }
-  
+
   char detail[32];
   snprintf(detail, sizeof(detail), "%s", wifiSSID);
   logToDisplay(CODE_WIFI_CONFIG_OK, detail);
-  
+
   // Настройки есть - продолжаем в обычном режиме
   // WiFi подключение будет происходить при необходимости (синхронизация NTP)
   // Не переходим в режим настройки, даже если WiFi временно недоступен
