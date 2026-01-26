@@ -44,8 +44,8 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Time & Date** – Hours/minutes with customizable display options (12/24-hour format, date, weekday)
 - **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption)
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
-- **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid
-- **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync, typically ~4 days apart)
+- **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid; configurable sync period (1-30 days via web interface)
+- **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync)
 - **Manual Time Correction** – User-configurable time correction to compensate for quartz crystal inaccuracy (adjustable in seconds per day via web interface)
 - **Web Configuration Interface** – Complete web-based setup for WiFi and all device settings via access point mode; no code modification needed
 - **Customizable Display** – Toggle date, weekday, time format (12/24h), debug codes, and weekday language (English/Russian)
@@ -87,6 +87,12 @@ The device automatically enters setup mode on first boot or when WiFi credential
 - Night start time (hours and minutes)
 - Night end time (hours and minutes)
 
+**NTP Sync Settings:**
+- Days between NTP syncs (1-30 days)
+  - Controls how often the device synchronizes time with NTP servers
+  - Default: 1 day (can be increased to reduce WiFi usage)
+  - Longer intervals reduce power consumption but may result in less accurate time
+
 **Time Correction:**
 - Time correction (seconds per day) - Manual correction for quartz crystal inaccuracy
   - Positive value: speeds up the clock (use if clock is running slow)
@@ -127,18 +133,13 @@ Most settings can be configured via web interface. The following settings can on
    ```
    Time is set to GMT+3. Change `3 * 3600` to your timezone offset if needed.
 
-2. **Sync Period** (line 31):
-   ```cpp
-   #define SYNC_DAYS 4   // NTP sync every 4 days
-   ```
-
-3. **Setup Mode AP** (lines 14-15):
+2. **Setup Mode AP** (lines 14-15):
    ```cpp
    #define AP_SSID "CelsiusClock"
    #define AP_PASSWORD "12345678"
    ```
 
-**Note:** All other settings (display options, night mode times, debug codes, etc.) can be configured via web interface and are stored in EEPROM.
+**Note:** All other settings (display options, night mode times, debug codes, NTP sync period, etc.) can be configured via web interface and are stored in EEPROM.
 
 ## Pin Configuration
 
@@ -178,8 +179,8 @@ All display elements (except battery indicator and temperature/humidity) can be 
 
 - **Web Configuration**: All device settings (WiFi credentials, display options, night mode times, etc.) can be configured via web interface. Settings are stored in EEPROM and persist across reboots. No code modification is required for normal operation.
 - **WiFi Configuration**: The device automatically enters setup mode if WiFi credentials are missing or if WiFi network becomes unavailable. In setup mode, the device creates an access point (`CelsiusClock`) and runs a web server for configuration. The device does not attempt NTP synchronization until WiFi is properly configured and available.
-- **Time Storage**: The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs (default resync every 4 days).
-- **Time Drift Correction**: The device automatically measures and compensates for RTC drift between NTP synchronizations. After the second sync (typically 4+ days after first sync), the drift rate is calculated and applied continuously. This compensates for typical ESP32-C3 RTC drift (e.g., ~3 minutes per day) without requiring more frequent WiFi syncs.
+- **Time Storage**: The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs. The NTP sync period is configurable via web interface (1-30 days, default: 1 day).
+- **Time Drift Correction**: The device automatically measures and compensates for RTC drift between NTP synchronizations. After the second sync, the drift rate is calculated and applied continuously. This compensates for typical ESP32-C3 RTC drift (e.g., ~3 minutes per day) without requiring more frequent WiFi syncs.
 - **Manual Time Correction**: In addition to automatic drift correction, you can manually adjust for quartz crystal inaccuracy using the "Time correction" setting in the web interface. This correction is applied continuously and proportionally to elapsed time. For example, if your clock is consistently 4 minutes slow per day, set the correction to `240` (positive value to speed up). The correction accumulates between NTP syncs, significantly reducing time deviation. This is especially useful when the automatic drift correction alone is insufficient or when you need precise calibration for your specific hardware.
 - **Setup Mode**: When in setup mode, the device runs at maximum CPU frequency (160 MHz) and does not enter deep sleep. After settings are configured and saved, the device reboots and returns to normal operation with deep sleep.
 - **Night Mode**: Night mode times are fully configurable via web interface (start and end hours/minutes). During night mode, the display and LED are turned off to save power.

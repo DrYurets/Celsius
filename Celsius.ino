@@ -29,8 +29,6 @@
 
 #define NIGHT_START_H 23
 #define NIGHT_END_H 7
-#define SYNC_DAYS 4
-#define SYNC_PERIOD_SEC (SYNC_DAYS * 24UL * 3600UL)
 
 // ---------- батарея ----------
 #define BAT_V_MAX 4.0f
@@ -113,6 +111,7 @@ struct DeviceSettings {
   uint8_t nightEndM;
   bool weekdayLanguageRu;        // true = Russian, false = English
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
+  uint8_t syncDays;               // количество суток между синхронизациями NTP
 };
 
 static DeviceSettings settings = {
@@ -126,7 +125,8 @@ static DeviceSettings settings = {
   .nightEndH = 7,
   .nightEndM = 0,
   .weekdayLanguageRu = true,
-  .timeCorrectionPerDay = 0
+  .timeCorrectionPerDay = 0,
+  .syncDays = 1
 };
 
 static bool sensorOK = false;
@@ -267,7 +267,8 @@ void loadSettings() {
   EEPROM.end();
 
   // Проверка валидности (магическое число)
-  if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59) {
+  if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59 || 
+      settings.syncDays == 0 || settings.syncDays > 30) {
     // Настройки невалидны, используем значения по умолчанию
     settings.showDebugCodes = false;
     settings.showDate = true;
@@ -280,6 +281,7 @@ void loadSettings() {
     settings.nightEndM = 0;
     settings.weekdayLanguageRu = true;
     settings.timeCorrectionPerDay = 0;
+    settings.syncDays = 4;
   }
 }
 
@@ -341,6 +343,11 @@ String getConfigPage() {
   html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
   html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
   html += "</div>";
+
+  html += "<h2>NTP Sync Settings</h2>";
+  html += "<label>Days between NTP syncs:</label>";
+  html += "<input type='number' name='syncDays' min='1' max='30' value='" + String(settings.syncDays) + "' required>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to sync time with NTP servers (1-30 days)</p>";
 
   html += "<h2>Time Correction</h2>";
   html += "<label>Time correction (seconds per day):</label>";
@@ -431,6 +438,14 @@ void handleSave() {
       // Ограничиваем разумными пределами: от -3600 до +3600 секунд в сутки
       if (correction >= -3600 && correction <= 3600) {
         settings.timeCorrectionPerDay = correction;
+      }
+    }
+
+    if (server.hasArg("syncDays")) {
+      int days = server.arg("syncDays").toInt();
+      // Ограничиваем разумными пределами: от 1 до 30 суток
+      if (days >= 1 && days <= 30) {
+        settings.syncDays = days;
       }
     }
 
@@ -759,8 +774,11 @@ uint32_t runCycle() {
   }
 
   bool needSync = !timeValid;
-  if (timeValid && lastSyncLocalEpoch > 0 && (storedEpoch - lastSyncLocalEpoch) >= SYNC_PERIOD_SEC) {
-    needSync = true;
+  if (timeValid && lastSyncLocalEpoch > 0) {
+    uint32_t syncPeriodSec = (uint32_t)settings.syncDays * 24UL * 3600UL;
+    if ((storedEpoch - lastSyncLocalEpoch) >= syncPeriodSec) {
+      needSync = true;
+    }
   }
 
   if (needSync) {
