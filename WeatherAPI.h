@@ -13,13 +13,13 @@ RTC_DATA_ATTR float previousOutdoorTemperature = NAN;
 RTC_DATA_ATTR time_t lastWeatherUpdate = 0;
 
 // Функция для получения температуры с API narodmon.ru
-bool fetchOutdoorTemperature(const char* apiUrl) {
+bool fetchOutdoorTemperature() {
   if (WiFi.status() != WL_CONNECTED) {
     return false;  // WiFi не подключен
   }
 
   HTTPClient http;
-  String url = String(apiUrl);
+  String url = "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4";
   
   http.begin(url);
   http.setTimeout(5000);  // Таймаут 5 секунд
@@ -70,19 +70,12 @@ bool fetchOutdoorTemperature(const char* apiUrl) {
   return false;
 }
 
-// Функция для проверки необходимости обновления
-bool shouldUpdateWeather(time_t currentTime, uint8_t updateHours) {
+// Функция для проверки необходимости обновления (каждый час)
+bool shouldUpdateWeather(time_t currentTime) {
   if (lastWeatherUpdate == 0) {
     return true;  // Первое обновление
   }
-  uint32_t updatePeriodSec = (uint32_t)updateHours * 3600UL;
-  return (currentTime - lastWeatherUpdate) >= updatePeriodSec;
-}
-
-// Функция для конвертации температуры в Фаренгейт
-float convertToFahrenheit(float celsius) {
-  if (isnan(celsius)) return NAN;
-  return (celsius * 9.0 / 5.0) + 32.0;
+  return (currentTime - lastWeatherUpdate) >= 3600;  // 3600 секунд = 1 час
 }
 
 // Функция для получения изменения температуры
