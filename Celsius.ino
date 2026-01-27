@@ -10,10 +10,11 @@
 #include <driver/adc.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+#include "WeatherAPI.h"
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define EEPROM_SIZE 256
+#define EEPROM_SIZE 512
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -112,6 +113,10 @@ struct DeviceSettings {
   bool weekdayLanguageRu;        // true = Russian, false = English
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
   uint8_t syncDays;               // количество суток между синхронизациями NTP
+  bool weatherEnabled;            // включен ли функционал погоды
+  char weatherApiUrl[256];        // URL API для получения погоды
+  uint8_t weatherUpdateHours;     // периодичность обновления погоды в часах
+  bool weatherUseFahrenheit;      // использовать Фаренгейт вместо Цельсия
 };
 
 static DeviceSettings settings = {
@@ -126,7 +131,11 @@ static DeviceSettings settings = {
   .nightEndM = 0,
   .weekdayLanguageRu = true,
   .timeCorrectionPerDay = 0,
-  .syncDays = 1
+  .syncDays = 1,
+  .weatherEnabled = false,
+  .weatherApiUrl = "",
+  .weatherUpdateHours = 1,
+  .weatherUseFahrenheit = false
 };
 
 static bool sensorOK = false;
@@ -268,7 +277,7 @@ void loadSettings() {
 
   // Проверка валидности (магическое число)
   if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59 || 
-      settings.syncDays == 0 || settings.syncDays > 30) {
+      settings.syncDays == 0 || settings.syncDays > 30 || settings.weatherUpdateHours == 0 || settings.weatherUpdateHours > 24) {
     // Настройки невалидны, используем значения по умолчанию
     settings.showDebugCodes = false;
     settings.showDate = true;
@@ -282,6 +291,15 @@ void loadSettings() {
     settings.weekdayLanguageRu = true;
     settings.timeCorrectionPerDay = 0;
     settings.syncDays = 4;
+    settings.weatherEnabled = false;
+    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
+    settings.weatherUpdateHours = 1;
+    settings.weatherUseFahrenheit = false;
+  }
+  
+  // Инициализация URL по умолчанию если пустой
+  if (strlen(settings.weatherApiUrl) == 0) {
+    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
   }
 }
 
@@ -353,6 +371,23 @@ String getConfigPage() {
   html += "<label>Time correction (seconds per day):</label>";
   html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
+
+  html += "<h2>Weather Settings</h2>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " id='weatherEnabled' onchange='toggleWeatherSettings()'><label for='weatherEnabled'>Enable weather data</label></div>";
+  html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + ";'>";
+  html += "<label>Weather API URL:</label>";
+  html += "<input type='text' name='weatherApiUrl' value='" + String(settings.weatherApiUrl) + "' style='margin-bottom: 10px;'>";
+  html += "<label>Update interval (hours):</label>";
+  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='weatherUseFahrenheit' " + String(settings.weatherUseFahrenheit ? "checked" : "") + "><label>Use Fahrenheit</label></div>";
+  html += "</div>";
+  html += "<script>";
+  html += "function toggleWeatherSettings() {";
+  html += "  var checkbox = document.getElementById('weatherEnabled');";
+  html += "  var settings = document.getElementById('weatherSettings');";
+  html += "  settings.style.display = checkbox.checked ? 'block' : 'none';";
+  html += "}";
+  html += "</script>";
 
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
@@ -448,6 +483,23 @@ void handleSave() {
         settings.syncDays = days;
       }
     }
+
+    // Обработка настроек погоды
+    settings.weatherEnabled = server.hasArg("weatherEnabled");
+    if (server.hasArg("weatherApiUrl")) {
+      String url = server.arg("weatherApiUrl");
+      url.trim();
+      if (url.length() > 0 && url.length() < 256) {
+        url.toCharArray(settings.weatherApiUrl, 256);
+      }
+    }
+    if (server.hasArg("weatherUpdateHours")) {
+      int hours = server.arg("weatherUpdateHours").toInt();
+      if (hours >= 1 && hours <= 24) {
+        settings.weatherUpdateHours = hours;
+      }
+    }
+    settings.weatherUseFahrenheit = server.hasArg("weatherUseFahrenheit");
 
     saveWiFiConfig(wifiSSID, wifiPassword);
     saveSettings();
@@ -660,7 +712,7 @@ float readBattery() {
 void drawBattery(uint8_t bars) {
   for (uint8_t i = 0; i < bars; i++) {
     uint8_t x = 2 + i * 6;
-    display.fillRect(x, 0, 4, 2, SSD1306_WHITE);
+    display.fillRect(x, 0, 4, 1, SSD1306_WHITE);
   }
 }
 
@@ -668,21 +720,21 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.clearDisplay();
   drawBattery(batBars);
 
-  int yPos = 8;
+  int yPos = 7;
 
   if (settings.showDate) {
     display.setTextSize(1);
     display.setCursor(0, yPos);
     display.printf("%02d.%02d", d, mo);
-    yPos += 14;
+    yPos += 12;
   }
 
   if (settings.showWeekday) {
     drawDayShort(wday, 6, yPos);
-    yPos += 14;
+    yPos += 12;
   }
 
-  display.drawLine(0, 36, 128, 36, SSD1306_WHITE);
+  display.drawLine(0, 32, 128, 32, SSD1306_WHITE);
 
   // Формат времени
   int displayH = h;
@@ -844,6 +896,13 @@ uint32_t runCycle() {
 #endif
 
   bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
+
+  // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
+  if (settings.weatherEnabled && timeValid && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+    setCpuPerformance();
+    fetchOutdoorTemperature(settings.weatherApiUrl);
+    setCpuLowPower();
+  }
 
   if (!timeValid) {
     logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
