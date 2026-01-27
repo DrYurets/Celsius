@@ -42,23 +42,32 @@
 
 // ---------- коды сообщений ----------
 #define CODE_WIFI_CONNECT "Wi-Fi connecting ..."      // подключение к Wi-Fi
-#define CODE_WIFI_FAIL "Wi-Fi connection FAIL"         // Wi-Fi недоступен
-#define CODE_NTP_SYNC "NTP sync"          // процесс синхронизации NTP
-#define CODE_NTP_OK "NTP sync ok"            // время успешно синхронизировано
-#define CODE_NTP_ERROR "NTP error"         // ошибка NTP
-#define CODE_SENSOR_OK "SHT Sensor found"         // датчик SHT31 найден
+#define CODE_WIFI_FAIL "Wi-Fi connection FAIL"        // Wi-Fi недоступен
+#define CODE_NTP_SYNC "NTP sync"                      // процесс синхронизации NTP
+#define CODE_NTP_OK "NTP sync ok"                     // время успешно синхронизировано
+#define CODE_NTP_ERROR "NTP error"                    // ошибка NTP
+#define CODE_SENSOR_OK "SHT Sensor found"             // датчик SHT31 найден
 #define CODE_SENSOR_MISSING "SHT Sensor not found"    // датчик SHT31 отсутствует
-#define CODE_FIRST_SYNC "First sync"        // первая синхронизация
-#define CODE_SETUP_DONE "Setup done"        // завершение setup
+#define CODE_FIRST_SYNC "First sync"                  // первая синхронизация
+#define CODE_SETUP_DONE "Setup done"                  // завершение setup
 #define CODE_MEASURE_INFO "Battery Measure info"      // минутное измерение батареи
-#define CODE_CONFIG_MODE "Setup mode"       // режим настройки активирован
-#define CODE_CONFIG_AP_START "Access point start"   // точка доступа запущена
-#define CODE_CONFIG_SAVED "Settings saved"      // настройки сохранены
-#define CODE_CPU_FREQ "CPU frequency"          // частота процессора
-#define CODE_WIFI_CONFIG_OK "WiFi settings ok"    // настройки WiFi найдены
-#define CODE_WIFI_CONFIG_MISS "WiFi settings miss"  // настройки WiFi не найдены
-#define CODE_WIFI_CONFIG_ERR "WiFi settings error"   // ошибка чтения настроек
-#define CODE_CONFIG_RESET "Settings reset"      // сброс настроек
+#define CODE_CONFIG_MODE "Setup mode"                 // режим настройки активирован
+#define CODE_CONFIG_AP_START "Access point start"     // точка доступа запущена
+#define CODE_CONFIG_SAVED "Settings saved"            // настройки сохранены
+#define CODE_CPU_FREQ "CPU frequency"                 // частота процессора
+#define CODE_WIFI_CONFIG_OK "WiFi settings ok"        // настройки WiFi найдены
+#define CODE_WIFI_CONFIG_MISS "WiFi settings miss"    // настройки WiFi не найдены
+#define CODE_WIFI_CONFIG_ERR "WiFi settings error"    // ошибка чтения настроек
+#define CODE_CONFIG_RESET "Settings reset"            // сброс настроек
+#define CODE_WEATHER_FETCH "Weather fetch"            // получение данных о погоде
+#define CODE_WEATHER_OK "Weather ok"                  // данные о погоде получены успешно
+#define CODE_WEATHER_ERROR "Weather error"            // ошибка получения данных о погоде
+#define CODE_WEATHER_WIFI_FAIL "Weather WiFi fail"    // WiFi недоступен для получения погоды
+#define CODE_WEATHER_HTTP_START "Weather HTTP start"  // начало HTTP запроса
+#define CODE_WEATHER_HTTP_CODE "Weather HTTP code"    // код ответа HTTP
+#define CODE_WEATHER_HTTP_ERROR "Weather HTTP err"    // ошибка HTTP запроса
+#define CODE_WEATHER_JSON_ERROR "Weather JSON err"    // ошибка парсинга JSON
+#define CODE_WEATHER_NO_DATA "Weather no data"        // нет данных в ответе
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -112,7 +121,10 @@ struct DeviceSettings {
   uint8_t nightEndM;
   bool weekdayLanguageRu;        // true = Russian, false = English
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
-  uint8_t syncDays;               // количество суток между синхронизациями NTP
+  uint8_t syncDays;              // количество суток между синхронизациями NTP
+  bool weatherEnabled;           // включить получение погоды
+  char weatherApiUrl[200];       // URL API для получения погоды
+  uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
 };
 
 static DeviceSettings settings = {
@@ -127,7 +139,10 @@ static DeviceSettings settings = {
   .nightEndM = 0,
   .weekdayLanguageRu = true,
   .timeCorrectionPerDay = 0,
-  .syncDays = 1
+  .syncDays = 1,
+  .weatherEnabled = false,
+  .weatherApiUrl = "",
+  .weatherUpdateHours = 1
 };
 
 static bool sensorOK = false;
@@ -177,7 +192,7 @@ time_t applyTimeCorrection(time_t baseEpoch, time_t referenceEpoch) {
   return baseEpoch + (time_t)correctionSeconds;
 }
 
-void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000) {
+void logToDisplay(const char *code, const char *detail, uint16_t holdMs) {
   if (!settings.showDebugCodes) {
     return;
   }
@@ -270,8 +285,7 @@ void loadSettings() {
   EEPROM.end();
 
   // Проверка валидности (магическое число)
-  if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59 || 
-      settings.syncDays == 0 || settings.syncDays > 30) {
+  if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59 || settings.syncDays == 0 || settings.syncDays > 30) {
     // Настройки невалидны, используем значения по умолчанию
     settings.showDebugCodes = false;
     settings.showDate = true;
@@ -285,6 +299,19 @@ void loadSettings() {
     settings.weekdayLanguageRu = true;
     settings.timeCorrectionPerDay = 0;
     settings.syncDays = 4;
+    settings.weatherEnabled = false;
+    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
+    settings.weatherUpdateHours = 1;
+  }
+
+  // Инициализация URL по умолчанию, если пустой
+  if (strlen(settings.weatherApiUrl) == 0) {
+    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
+  }
+
+  // Валидация weatherUpdateHours
+  if (settings.weatherUpdateHours == 0 || settings.weatherUpdateHours > 24) {
+    settings.weatherUpdateHours = 1;
   }
 }
 
@@ -356,6 +383,23 @@ String getConfigPage() {
   html += "<label>Time correction (seconds per day):</label>";
   html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
+
+  html += "<h2>Weather Settings</h2>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' id='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " onchange='toggleWeatherSettings()'><label>Enable weather data</label></div>";
+  html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + "'>";
+  html += "<label>Weather API URL:</label>";
+  html += "<input type='text' name='weatherApiUrl' value='" + String(settings.weatherApiUrl) + "' style='margin-bottom: 10px;'>";
+  html += "<label>Update interval (hours):</label>";
+  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather data (1-24 hours). Updates only when display is on.</p>";
+  html += "</div>";
+  html += "<script>";
+  html += "function toggleWeatherSettings() {";
+  html += "  var checkbox = document.getElementById('weatherEnabled');";
+  html += "  var settings = document.getElementById('weatherSettings');";
+  html += "  settings.style.display = checkbox.checked ? 'block' : 'none';";
+  html += "}";
+  html += "</script>";
 
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
@@ -449,6 +493,25 @@ void handleSave() {
       // Ограничиваем разумными пределами: от 1 до 30 суток
       if (days >= 1 && days <= 30) {
         settings.syncDays = days;
+      }
+    }
+
+    // Обработка настроек погоды
+    settings.weatherEnabled = server.hasArg("weatherEnabled");
+
+    if (server.hasArg("weatherApiUrl")) {
+      String url = server.arg("weatherApiUrl");
+      url.trim();
+      if (url.length() > 0 && url.length() < 200) {
+        url.toCharArray(settings.weatherApiUrl, 200);
+      }
+    }
+
+    if (server.hasArg("weatherUpdateHours")) {
+      int hours = server.arg("weatherUpdateHours").toInt();
+      // Ограничиваем разумными пределами: от 1 до 24 часов
+      if (hours >= 1 && hours <= 24) {
+        settings.weatherUpdateHours = hours;
       }
     }
 
@@ -704,15 +767,18 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
   display.setTextSize(1);
   display.setCursor(6, 92);
-  display.print((int)tempC); // температура снаружи
-  display.print((char)247);
-  display.print("C");
+  // Наружная температура (если включена и доступна)
+  if (settings.weatherEnabled && !isnan(outdoorTemperature)) {
+    display.print((int)outdoorTemperature);
+    display.print((char)247);
+    display.print("C");
+  }
   display.setCursor(6, 106);
-  display.print((int)tempC); // температура внутри
+  display.print((int)tempC);  // температура внутри
   display.print((char)247);
   display.print("C");
   display.setCursor(9, 120);
-  display.printf("%d%%", (int)hum); // влажность
+  display.printf("%d%%", (int)hum);  // влажность
   display.display();
   memcpy(displayBackup, display.getBuffer(), OLED_BUFFER_SIZE);
   displayBackupValid = true;
@@ -851,6 +917,62 @@ uint32_t runCycle() {
 #endif
 
   bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
+
+  // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
+  if (settings.weatherEnabled && timeValid && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+    logToDisplay(CODE_WEATHER_FETCH);
+    setCpuPerformance();
+
+    // Проверяем текущий статус WiFi
+    wl_status_t wifiStatus = WiFi.status();
+    char detail[32];
+    snprintf(detail, sizeof(detail), "WiFi st=%d", wifiStatus);
+    logToDisplay(CODE_WEATHER_FETCH, detail);
+
+    // Подключаемся к WiFi, если не подключены
+    if (wifiStatus != WL_CONNECTED) {
+      WiFi.persistent(false);
+      WiFi.mode(WIFI_STA);
+      WiFi.setSleep(false);
+      WiFi.begin(wifiSSID, wifiPassword);
+
+      unsigned long startAttempt = millis();
+      while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 15000UL) {
+        delay(200);
+        wifiStatus = WiFi.status();
+        if ((millis() - startAttempt) % 2000 < 200) {  // Показываем статус каждые 2 секунды
+          snprintf(detail, sizeof(detail), "Connecting %d", wifiStatus);
+          logToDisplay(CODE_WEATHER_FETCH, detail);
+        }
+      }
+    }
+
+    wifiStatus = WiFi.status();
+    snprintf(detail, sizeof(detail), "Final st=%d", wifiStatus);
+    logToDisplay(CODE_WEATHER_FETCH, detail);
+
+    if (wifiStatus == WL_CONNECTED) {
+      bool success = fetchOutdoorTemperature(settings.weatherApiUrl);
+      if (success) {
+        snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
+        logToDisplay(CODE_WEATHER_OK, detail);
+      } else {
+        logToDisplay(CODE_WEATHER_ERROR);
+        // Обновляем время последней попытки даже при ошибке, чтобы не пытаться каждую минуту
+        // shouldUpdateWeather() использует меньший интервал (5 минут) для повторных попыток при ошибке
+        lastWeatherUpdate = local;
+      }
+    } else {
+      snprintf(detail, sizeof(detail), "Status=%d", wifiStatus);
+      logToDisplay(CODE_WEATHER_WIFI_FAIL, detail);
+      // Обновляем время последней попытки даже при ошибке WiFi
+      lastWeatherUpdate = local;
+    }
+
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    setCpuLowPower();
+  }
 
   if (!timeValid) {
     logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
