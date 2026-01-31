@@ -14,10 +14,11 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define EEPROM_SIZE 256
+// SSID 64 + PASS 64 + Settings (struct ~224 байт, weatherApiUrl[200]). Запас под рост.
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
+#define EEPROM_SIZE 512
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
@@ -300,13 +301,16 @@ void loadSettings() {
     settings.timeCorrectionPerDay = 0;
     settings.syncDays = 4;
     settings.weatherEnabled = false;
-    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
+    strcpy(settings.weatherApiUrl, "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1");
     settings.weatherUpdateHours = 1;
   }
 
-  // Инициализация URL по умолчанию, если пустой
-  if (strlen(settings.weatherApiUrl) == 0) {
-    strcpy(settings.weatherApiUrl, "http://api.narodmon.ru/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&lang=ru&uuid=00f3694f782462152b5a548b2af0f2c4");
+  // Инициализация URL по умолчанию, если пустой или повреждён (например после увеличения EEPROM)
+  const char *defaultWeatherUrl = "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1";
+  size_t urlLen = strnlen(settings.weatherApiUrl, 200);
+  bool urlInvalid = (urlLen == 0 || urlLen >= 199 || strncmp(settings.weatherApiUrl, "http", 4) != 0);
+  if (urlInvalid) {
+    strcpy(settings.weatherApiUrl, defaultWeatherUrl);
   }
 
   // Валидация weatherUpdateHours
@@ -388,7 +392,12 @@ String getConfigPage() {
   html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' id='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " onchange='toggleWeatherSettings()'><label>Enable weather data</label></div>";
   html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + "'>";
   html += "<label>Weather API URL:</label>";
-  html += "<input type='text' name='weatherApiUrl' value='" + String(settings.weatherApiUrl) + "' style='margin-bottom: 10px;'>";
+  // Экранируем & " ' для HTML, иначе длинный URL обрезается в атрибуте value
+  String weatherUrlEscaped = String(settings.weatherApiUrl);
+  weatherUrlEscaped.replace("&", "&amp;");
+  weatherUrlEscaped.replace("\"", "&quot;");
+  weatherUrlEscaped.replace("'", "&#39;");
+  html += "<input type='text' name='weatherApiUrl' value='" + weatherUrlEscaped + "' style='margin-bottom: 10px;'>";
   html += "<label>Update interval (hours):</label>";
   html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather data (1-24 hours). Updates only when display is on.</p>";
@@ -766,12 +775,18 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.drawLine(0, 86, 128, 86, SSD1306_WHITE);
 
   display.setTextSize(1);
-  display.setCursor(6, 92);
   // Наружная температура (если включена и доступна)
   if (settings.weatherEnabled && !isnan(outdoorTemperature)) {
+    if (outdoorTemperature > 0) {
+      display.setCursor(9, 92);
+    } else {
+      display.setCursor(6, 92);  // оставляем место для минуса
+    }
     display.print((int)outdoorTemperature);
     display.print((char)247);
-    display.print("C");
+    if (outdoorTemperature > 0) {
+      display.print("C");
+    }
   }
   display.setCursor(6, 106);
   display.print((int)tempC);  // температура внутри
