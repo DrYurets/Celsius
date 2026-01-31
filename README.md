@@ -29,6 +29,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Adafruit SSD1306** - Driver for SSD1306 OLED displays
 - **Adafruit SHT31** - Driver for SHT31 temperature/humidity sensor
 - **NTPClient** - Network Time Protocol client for time synchronization
+- **ArduinoJson** - JSON parsing for weather API responses
 
 ### Built-in Libraries Used
 
@@ -42,7 +43,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 ## Features
 
 - **Time & Date** – Hours/minutes with customizable display options (12/24-hour format, date, weekday)
-- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption)
+- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption); optional outdoor temperature from weather API (e.g. [Narodmon](https://narodmon.com))
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
 - **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid; configurable sync period (1-30 days via web interface)
 - **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync)
@@ -51,6 +52,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Customizable Display** – Toggle date, weekday, time format (12/24h), debug codes, and weekday language (English/Russian)
 - **Configurable Night Mode** – Customizable start and end times for night mode (display and LED off)
 - **Hourly LED Blink** – Optional status LED blink at the start of each hour (can be disabled)
+- **Outdoor Weather (optional)** – Fetch outdoor temperature from a configurable API URL (default: Narodmon); update interval 1–24 hours; WiFi is connected only for the request, then disconnected; weather updates only when display is on (not in night mode)
 - **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
 - **Status Codes (optional)** – Two-character diagnostic codes (A1, B2, …) can be enabled via web interface
 
@@ -99,6 +101,11 @@ The device automatically enters setup mode on first boot or when WiFi credential
   - Negative value: slows down the clock (use if clock is running fast)
   - Default: 0 (no correction)
   - Example: If clock is 4 minutes slow per day, enter `240` (4 minutes × 60 seconds)
+
+**Weather Settings:**
+- Enable weather data (checkbox) – show outdoor temperature from an API on the display
+- Weather API URL – full URL for the weather API (default: Narodmon sensors; supports JSON with a `sensors` array and `value` field per sensor; values are averaged and rounded)
+- Update interval (hours) – how often to fetch weather (1–24 hours, default: 1). Updates run only when the display is on (not in night mode). After each fetch, WiFi is disconnected; it is reconnected only before the next scheduled update.
 
 **Setup Mode Behavior:**
 
@@ -158,6 +165,7 @@ Most settings can be configured via web interface. The following settings can on
    - Adafruit SSD1306
    - Adafruit SHT31
    - NTPClient
+   - ArduinoJson (for weather API)
 3. (Optional) Adjust timezone in the code if needed (all other settings can be configured via web interface)
 4. Upload the sketch to your ESP32-C3
 5. Connect the hardware according to the pin configuration
@@ -171,7 +179,7 @@ The display layout is customizable via web interface:
 - **Date section** (optional, can be disabled): Date in DD.MM format
 - **Weekday section** (optional, can be disabled): Weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU)
 - **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
-- **Bottom**: Temperature (°C) and humidity (%) (always shown)
+- **Bottom**: Indoor temperature (°C) and humidity (%) from SHT31 (always shown); if weather is enabled, outdoor temperature is also shown (from the configured API)
 
 All display elements (except battery indicator and temperature/humidity) can be toggled on/off via web interface.
 
@@ -185,6 +193,7 @@ All display elements (except battery indicator and temperature/humidity) can be 
 - **Setup Mode**: When in setup mode, the device runs at maximum CPU frequency (160 MHz) and does not enter deep sleep. After settings are configured and saved, the device reboots and returns to normal operation with deep sleep.
 - **Night Mode**: Night mode times are fully configurable via web interface (start and end hours/minutes). During night mode, the display and LED are turned off to save power.
 - **Display Customization**: All display elements (date, weekday, time format, debug codes) can be toggled on/off via web interface. Weekday language can be switched between English and Russian.
+- **Weather & WiFi**: When weather is enabled, the device connects to WiFi only when it is time to update weather (and when the display is on). After the HTTP request, WiFi is disconnected and switched off (`WiFi.disconnect(true)` and `WiFi.mode(WIFI_OFF)`), so the radio is not left on between updates. On the next scheduled update, WiFi is connected again. This keeps power usage low.
 - Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
 - Status codes are disabled by default; can be enabled via web interface for quick troubleshooting directly on the OLED.
 
