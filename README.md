@@ -1,8 +1,13 @@
 # DIY Stellar Clock - Celsius Version
 
-A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on a 128×32 OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
+A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on an OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
 
 ![DIY Stellar Clock](outer_view.jpg)
+
+## Branches / Display variants
+
+- **main**, **correction** — код для дисплея **128×32** пикселей (портретная ориентация).
+- **128x64** — код для дисплея **128×64** пикселей в **альбомной ориентации** (landscape). В этой ветке дата и день недели выводятся в одну строку, разметка экрана и константы (`SCREEN_WIDTH`, `SCREEN_HEIGHT`) настроены под 128×64. Переключитесь на ветку `128x64` перед сборкой, если используете OLED 128×64.
 
 ## Inspiration
 
@@ -11,7 +16,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 ## Hardware Components
 
 - **ESP32-C3** - Main microcontroller
-- **OLED Display** - SSD1306, 128x32 pixels
+- **OLED Display** - SSD1306, 128×32 or 128×64 pixels (см. ветку **128x64** для альбомной ориентации 128×64)
 - **SHT31-D Sensor** - Temperature and humidity sensor
 - **LED** - Status indicator (blinks at the start of each hour)
 - **Type-C Charging Module** - Power management
@@ -176,8 +181,7 @@ Most settings can be configured via web interface. The following settings can on
 The display layout is customizable via web interface:
 
 - **Top**: 5-bar battery indicator (always shown)
-- **Date section** (optional, can be disabled): Date in DD.MM format
-- **Weekday section** (optional, can be disabled): Weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU)
+- **Date and weekday** (optional, can be disabled): Date in DD.MM format; weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU). В ветке **128x64** дата и день недели выводятся в одну строку (дата слева, день недели справа).
 - **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
 - **Bottom**: Indoor temperature (°C) and humidity (%) from SHT31 (always shown); if weather is enabled, outdoor temperature is also shown (from the configured API)
 
