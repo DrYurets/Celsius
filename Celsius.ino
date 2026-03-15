@@ -23,8 +23,8 @@
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
 #define SHT31_ADDR 0x44
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
+#define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
+#define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
 #define LED_PIN 0
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
@@ -739,25 +739,30 @@ void drawBattery(uint8_t bars) {
   }
 }
 
+/*
+* Вывод на экран
+*/
+
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.clearDisplay();
-  drawBattery(batBars);
+  drawBattery(batBars); // заряд батареи
 
   int yPos = 7;
 
-  if (settings.showDate) {
+  if (settings.showDate || settings.showWeekday) { // дата и день недели
     display.setTextSize(1);
-    display.setCursor(0, yPos);
-    display.printf("%02d.%02d", d, mo);
+    if (settings.showDate) {
+      display.setCursor(0, yPos);
+      display.printf("%02d.%02d", d, mo);
+    }
+    if (settings.showWeekday) {
+      // день недели в ту же строку справа
+      drawDayShort(wday, display.width() - 22, yPos);
+    }
     yPos += 12;
   }
 
-  if (settings.showWeekday) {
-    drawDayShort(wday, 6, yPos);
-    yPos += 12;
-  }
-
-  display.drawLine(0, 32, 128, 32, SSD1306_WHITE);
+  //display.drawLine(0, 20, 128, 20, SSD1306_WHITE); // разделительная линия
 
   // Формат времени
   int displayH = h;
@@ -766,21 +771,19 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
     if (displayH == 0) displayH = 12;
   }
 
-  display.setTextSize(2);
-  display.setCursor(5, 40);
-  display.printf("%02d", displayH);
-  display.setCursor(5, 64);
-  display.printf("%02d", m);
+  display.setTextSize(4);
+  display.setCursor(4, 22);
+  display.printf("%02d:%02d", displayH, m);
 
-  display.drawLine(0, 86, 128, 86, SSD1306_WHITE);
+  //display.drawLine(0, 48, 128, 48, SSD1306_WHITE);
 
   display.setTextSize(1);
   // Наружная температура (если включена и доступна)
   if (settings.weatherEnabled && !isnan(outdoorTemperature)) {
     if (outdoorTemperature > 0) {
-      display.setCursor(9, 92);
+      display.setCursor(9, 56);
     } else {
-      display.setCursor(6, 92);  // оставляем место для минуса
+      display.setCursor(6, 56);  // оставляем место для минуса
     }
     display.print((int)outdoorTemperature);
     display.print((char)247);
@@ -788,11 +791,11 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       display.print("C");
     }
   }
-  display.setCursor(6, 106);
+  display.setCursor(50, 56);
   display.print((int)tempC);  // температура внутри
   display.print((char)247);
   display.print("C");
-  display.setCursor(9, 120);
+  display.setCursor(100, 56);
   display.printf("%d%%", (int)hum);  // влажность
   display.display();
   memcpy(displayBackup, display.getBuffer(), OLED_BUFFER_SIZE);
@@ -1079,7 +1082,7 @@ void setup() {
       delay(200);
     }
   }
-  display.setRotation(1);
+  display.setRotation(0);
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   setBrightness(0x01);
