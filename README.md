@@ -7,7 +7,12 @@ A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and ba
 ## Branches / Display variants
 
 - **main**, **correction** — код для дисплея **128×32** пикселей (портретная ориентация).
-- **128x64** — код для дисплея **128×64** пикселей в **альбомной ориентации** (landscape). В этой ветке дата и день недели выводятся в одну строку, разметка экрана и константы (`SCREEN_WIDTH`, `SCREEN_HEIGHT`) настроены под 128×64. Переключитесь на ветку `128x64` перед сборкой, если используете OLED 128×64.
+- **128x64** — код для дисплея **128×64** пикселей в **альбомной ориентации** (landscape). Переключитесь на ветку `128x64` перед сборкой, если используете OLED 128×64.
+
+  **Улучшения в ветке 128x64:**
+  - **Индикатор заряда** — в виде заполняемой иконки батарейки (как на смартфонах): контур корпуса с «носиком» (контакт), уровень заряда показывается заливкой. Иконка расположена в **правом верхнем углу** экрана, позиция привязана к `display.width()`.
+  - **Дата и день недели в одну строку** — дата (DD.MM) слева, день недели **сразу после даты** (например, `26.01  ПН`), без привязки к правому краю.
+  - Разметка экрана и константы `SCREEN_WIDTH`, `SCREEN_HEIGHT` настроены под 128×64; время и температуры адаптированы под альбомный layout.
 
 ## Inspiration
 
@@ -181,7 +186,7 @@ Most settings can be configured via web interface. The following settings can on
 The display layout is customizable via web interface:
 
 - **Top**: 5-bar battery indicator (always shown)
-- **Date and weekday** (optional, can be disabled): Date in DD.MM format; weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU). В ветке **128x64** дата и день недели выводятся в одну строку (дата слева, день недели справа).
+- **Date and weekday** (optional, can be disabled): Date in DD.MM format; weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU). В ветке **128x64** дата и день недели в одной строке: дата слева, день недели сразу после даты (например `26.01  ПН`); индикатор заряда — иконка батарейки в правом верхнем углу.
 - **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
 - **Bottom**: Indoor temperature (°C) and humidity (%) from SHT31 (always shown); if weather is enabled, outdoor temperature is also shown (from the configured API)
 

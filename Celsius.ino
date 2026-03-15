@@ -732,10 +732,27 @@ float readBattery() {
   return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
 }
 
+// Иконка батареи (как на телефоне): контур + заполнение по уровню заряда, в правом верхнем углу
 void drawBattery(uint8_t bars) {
-  for (uint8_t i = 0; i < bars; i++) {
-    uint8_t x = 2 + i * 6;
-    display.fillRect(x, 0, 4, 1, SSD1306_WHITE);
+  const int16_t bodyW = 20;
+  const int16_t bodyH = 10;
+  const int16_t tabW = 2;
+  const int16_t tabH = 4;
+  int16_t right = (int16_t)display.width();
+  int16_t bx = right - tabW - bodyW;  // левый край корпуса
+
+  // контур корпуса
+  display.drawRect(bx, 0, bodyW, bodyH, SSD1306_WHITE);
+  // контур «носика» (плюс) справа по центру
+  display.drawRect(right - tabW, (bodyH - tabH) / 2, tabW, tabH, SSD1306_WHITE);
+
+  // заполнение по уровню (0..BAT_STEPS)
+  if (bars > 0) {
+    int16_t innerW = bodyW - 2;
+    int16_t fillW = (int16_t)((uint32_t)bars * innerW / BAT_STEPS);
+    if (fillW > 0) {
+      display.fillRect(bx + 1, 1, fillW, bodyH - 2, SSD1306_WHITE);
+    }
   }
 }
 
@@ -749,15 +766,15 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
   int yPos = 7;
 
-  if (settings.showDate || settings.showWeekday) { // дата и день недели
+  if (settings.showDate || settings.showWeekday) { // дата и день недели в одну строку
     display.setTextSize(1);
     if (settings.showDate) {
       display.setCursor(0, yPos);
       display.printf("%02d.%02d", d, mo);
     }
     if (settings.showWeekday) {
-      // день недели в ту же строку справа
-      drawDayShort(wday, display.width() - 22, yPos);
+      // день недели сразу после даты (DD.MM ~30 px, отступ 6 px)
+      drawDayShort(wday, 38, yPos);
     }
     yPos += 12;
   }
@@ -781,9 +798,9 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   // Наружная температура (если включена и доступна)
   if (settings.weatherEnabled && !isnan(outdoorTemperature)) {
     if (outdoorTemperature > 0) {
-      display.setCursor(9, 56);
+      display.setCursor(12, 56);
     } else {
-      display.setCursor(6, 56);  // оставляем место для минуса
+      display.setCursor(9, 56);  // оставляем место для минуса
     }
     display.print((int)outdoorTemperature);
     display.print((char)247);
@@ -791,7 +808,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       display.print("C");
     }
   }
-  display.setCursor(50, 56);
+  display.setCursor(52, 56);
   display.print((int)tempC);  // температура внутри
   display.print((char)247);
   display.print("C");
