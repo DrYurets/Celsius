@@ -43,7 +43,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 ## Features
 
 - **Time & Date** – Hours/minutes with customizable display options (12/24-hour format, date, weekday)
-- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption); optional outdoor temperature from weather API (e.g. [Narodmon](https://narodmon.com))
+- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption); optional outdoor temperature from a weather API (Narodmon or AccuWeather/OpenWeather)
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
 - **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid; configurable sync period (1-30 days via web interface)
 - **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync)
@@ -52,7 +52,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Customizable Display** – Toggle date, weekday, time format (12/24h), debug codes, and weekday language (English/Russian)
 - **Configurable Night Mode** – Customizable start and end times for night mode (display and LED off)
 - **Hourly LED Blink** – Optional status LED blink at the start of each hour (can be disabled)
-- **Outdoor Weather (optional)** – Fetch outdoor temperature from a configurable API URL (default: Narodmon); update interval 1–24 hours; WiFi is connected only for the request, then disconnected; weather updates only when display is on (not in night mode)
+- **Outdoor Weather (optional)** – Fetch outdoor temperature from a configurable API URL (default: AccuWeather/OpenWeather); update interval 1–24 hours; WiFi is connected only for the request, then disconnected; weather updates only when display is on (not in night mode)
 - **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
 - **Status Codes (optional)** – Two-character diagnostic codes (A1, B2, …) can be enabled via web interface
 
@@ -104,7 +104,11 @@ The device automatically enters setup mode on first boot or when WiFi credential
 
 **Weather Settings:**
 - Enable weather data (checkbox) – show outdoor temperature from an API on the display
-- Weather API URL – full URL for the weather API (default: Narodmon sensors; supports JSON with a `sensors` array and `value` field per sensor; values are averaged and rounded)
+- Weather source – `Narodmon` or `AccuWeather (OpenWeather)`
+- Weather API URL – full URL for the selected weather source
+  - Narodmon expects JSON with a `sensors` array and `value` field per sensor (values are averaged and rounded)
+  - AccuWeather/OpenWeather expects JSON with `main.temp` (uses only `main.temp`)
+  - Example documentation: [OpenWeather current weather data](https://openweathermap.org/current?collection=current_forecast)
 - Update interval (hours) – how often to fetch weather (1–24 hours, default: 1). Updates run only when the display is on (not in night mode). After each fetch, WiFi is disconnected; it is reconnected only before the next scheduled update.
 
 **Setup Mode Behavior:**

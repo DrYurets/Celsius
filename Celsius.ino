@@ -32,6 +32,12 @@
 #define NIGHT_START_H 23
 #define NIGHT_END_H 7
 
+// Источники погоды
+// 0 = narodmon (JSON с корнем "sensors": [{ "value": ... }, ...])
+// 1 = accuweather/openweathermap current weather (JSON с "main": { "temp": ... })
+#define WEATHER_SOURCE_NARODMON 0
+#define WEATHER_SOURCE_ACCUWEATHER 1
+
 // ---------- батарея ----------
 #define BAT_V_MAX 4.0f
 #define BAT_V_MIN 3.0f
@@ -124,6 +130,7 @@ struct DeviceSettings {
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
   uint8_t syncDays;              // количество суток между синхронизациями NTP
   bool weatherEnabled;           // включить получение погоды
+  uint8_t weatherSource;         // 0=narodmon, 1=accuweather/openweathermap
   char weatherApiUrl[200];       // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
 };
@@ -142,7 +149,8 @@ static DeviceSettings settings = {
   .timeCorrectionPerDay = 0,
   .syncDays = 1,
   .weatherEnabled = false,
-  .weatherApiUrl = "",
+  .weatherSource = WEATHER_SOURCE_ACCUWEATHER,
+  .weatherApiUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru",
   .weatherUpdateHours = 1
 };
 
@@ -285,6 +293,15 @@ void loadSettings() {
   }
   EEPROM.end();
 
+  // Дефолтные URL для разных источников
+  const char *defaultNarodmonUrl = "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1";
+  const char *defaultAccuWeatherUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru";
+
+  // На случай чтения мусора из EEPROM после изменения структуры
+  if (settings.weatherSource != WEATHER_SOURCE_NARODMON && settings.weatherSource != WEATHER_SOURCE_ACCUWEATHER) {
+    settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
+  }
+
   // Проверка валидности (магическое число)
   if (settings.nightStartH > 23 || settings.nightEndH > 23 || settings.nightStartM > 59 || settings.nightEndM > 59 || settings.syncDays == 0 || settings.syncDays > 30) {
     // Настройки невалидны, используем значения по умолчанию
@@ -301,16 +318,24 @@ void loadSettings() {
     settings.timeCorrectionPerDay = 0;
     settings.syncDays = 4;
     settings.weatherEnabled = false;
-    strcpy(settings.weatherApiUrl, "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1");
+    settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
+    strcpy(settings.weatherApiUrl, defaultAccuWeatherUrl);
     settings.weatherUpdateHours = 1;
   }
 
-  // Инициализация URL по умолчанию, если пустой или повреждён (например после увеличения EEPROM)
-  const char *defaultWeatherUrl = "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1";
+  // Валидация инициализации URL (на случай повреждения EEPROM/старой прошивки/обрезки)
+  settings.weatherApiUrl[199] = '\0';
   size_t urlLen = strnlen(settings.weatherApiUrl, 200);
-  bool urlInvalid = (urlLen == 0 || urlLen >= 199 || strncmp(settings.weatherApiUrl, "http", 4) != 0);
+  const char *expectedNeedle =
+    (settings.weatherSource == WEATHER_SOURCE_NARODMON) ? "cmd=sensorsValues" : "/data/2.5/weather";
+
+  bool urlInvalid = (urlLen == 0 || urlLen >= 199 ||
+                     strncmp(settings.weatherApiUrl, "http", 4) != 0 ||
+                     strstr(settings.weatherApiUrl, expectedNeedle) == nullptr);
+
   if (urlInvalid) {
-    strcpy(settings.weatherApiUrl, defaultWeatherUrl);
+    strcpy(settings.weatherApiUrl,
+           (settings.weatherSource == WEATHER_SOURCE_NARODMON) ? defaultNarodmonUrl : defaultAccuWeatherUrl);
   }
 
   // Валидация weatherUpdateHours
@@ -391,6 +416,12 @@ String getConfigPage() {
   html += "<h2>Weather Settings</h2>";
   html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' id='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " onchange='toggleWeatherSettings()'><label>Enable weather data</label></div>";
   html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + "'>";
+  html += "<label>Weather source:</label>";
+  html += "<select name='weatherSource' style='width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box;'>";
+  html += "<option value='narodmon' " + String(settings.weatherSource == WEATHER_SOURCE_NARODMON ? "selected" : "") + ">Narodmon</option>";
+  html += "<option value='accuweather' " + String(settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER ? "selected" : "") + ">AccuWeather (OpenWeather)</option>";
+  html += "</select>";
+
   html += "<label>Weather API URL:</label>";
   // Экранируем & " ' для HTML, иначе длинный URL обрезается в атрибуте value
   String weatherUrlEscaped = String(settings.weatherApiUrl);
@@ -507,6 +538,16 @@ void handleSave() {
 
     // Обработка настроек погоды
     settings.weatherEnabled = server.hasArg("weatherEnabled");
+
+    if (server.hasArg("weatherSource")) {
+      String src = server.arg("weatherSource");
+      src.trim();
+      if (src == "narodmon") {
+        settings.weatherSource = WEATHER_SOURCE_NARODMON;
+      } else if (src == "accuweather") {
+        settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
+      }
+    }
 
     if (server.hasArg("weatherApiUrl")) {
       String url = server.arg("weatherApiUrl");
@@ -967,7 +1008,7 @@ uint32_t runCycle() {
     logToDisplay(CODE_WEATHER_FETCH, detail);
 
     if (wifiStatus == WL_CONNECTED) {
-      bool success = fetchOutdoorTemperature(settings.weatherApiUrl);
+      bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
       if (success) {
         snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
         logToDisplay(CODE_WEATHER_OK, detail);
