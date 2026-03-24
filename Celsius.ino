@@ -8,9 +8,11 @@
 #include <NTPClient.h>
 #include <esp_sleep.h>
 #include <driver/adc.h>
+#include <driver/gpio.h>
 #include <WebServer.h>
 #include <EEPROM.h>
 #include "WeatherAPI.h"
+#include "WeatherDisplay.h"
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
@@ -26,6 +28,7 @@
 #define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
 #define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
 #define LED_PIN 0
+#define WEATHER_BUTTON_PIN 4
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
 
@@ -133,6 +136,7 @@ struct DeviceSettings {
   uint8_t weatherSource;         // 0=narodmon, 1=accuweather/openweathermap
   char weatherApiUrl[200];       // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
+  uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
 };
 
 static DeviceSettings settings = {
@@ -151,13 +155,15 @@ static DeviceSettings settings = {
   .weatherEnabled = false,
   .weatherSource = WEATHER_SOURCE_ACCUWEATHER,
   .weatherApiUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru",
-  .weatherUpdateHours = 1
+  .weatherUpdateHours = 1,
+  .weatherScreenSeconds = 10
 };
 
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
 static bool displayOn = true;
+static bool wokeByWeatherButton = false;
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -173,6 +179,18 @@ bool isNight(int h, int m = 0) {
 
 bool hasValidTime(time_t epoch) {
   return epoch > 100000;
+}
+
+bool isWeatherButtonPressed() {
+  // Простая фильтрация дребезга: 5 быстрых чтений
+  uint8_t lowCount = 0;
+  for (uint8_t i = 0; i < 5; i++) {
+    if (digitalRead(WEATHER_BUTTON_PIN) == LOW) {
+      lowCount++;
+    }
+    delay(2);
+  }
+  return lowCount >= 4;
 }
 
 time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
@@ -321,6 +339,7 @@ void loadSettings() {
     settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
     strcpy(settings.weatherApiUrl, defaultAccuWeatherUrl);
     settings.weatherUpdateHours = 1;
+    settings.weatherScreenSeconds = 10;
   }
 
   // Валидация инициализации URL (на случай повреждения EEPROM/старой прошивки/обрезки)
@@ -341,6 +360,9 @@ void loadSettings() {
   // Валидация weatherUpdateHours
   if (settings.weatherUpdateHours == 0 || settings.weatherUpdateHours > 24) {
     settings.weatherUpdateHours = 1;
+  }
+  if (settings.weatherScreenSeconds == 0 || settings.weatherScreenSeconds > 60) {
+    settings.weatherScreenSeconds = 10;
   }
 }
 
@@ -431,6 +453,8 @@ String getConfigPage() {
   html += "<input type='text' name='weatherApiUrl' value='" + weatherUrlEscaped + "' style='margin-bottom: 10px;'>";
   html += "<label>Update interval (hours):</label>";
   html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
+  html += "<label>Weather screen timeout (sec):</label>";
+  html += "<input type='number' name='weatherScreenSeconds' min='1' max='60' value='" + String(settings.weatherScreenSeconds) + "' required style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather data (1-24 hours). Updates only when display is on.</p>";
   html += "</div>";
   html += "<script>";
@@ -562,6 +586,12 @@ void handleSave() {
       // Ограничиваем разумными пределами: от 1 до 24 часов
       if (hours >= 1 && hours <= 24) {
         settings.weatherUpdateHours = hours;
+      }
+    }
+    if (server.hasArg("weatherScreenSeconds")) {
+      int sec = server.arg("weatherScreenSeconds").toInt();
+      if (sec >= 1 && sec <= 60) {
+        settings.weatherScreenSeconds = sec;
       }
     }
 
@@ -1030,6 +1060,7 @@ uint32_t runCycle() {
     if (wifiStatus == WL_CONNECTED) {
       bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
       if (success) {
+        lastWeatherUpdate = local;  // та же шкала, что в shouldUpdateWeather() (не time(nullptr) — libc не синхронизирован с storedEpoch)
         snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
         logToDisplay(CODE_WEATHER_OK, detail);
       } else {
@@ -1055,6 +1086,21 @@ uint32_t runCycle() {
   } else if (!night) {
     setDisplayState(true);
     setBrightness(0x01);
+
+    // Показываем детали погоды либо после wakeup по кнопке,
+    // либо если кнопку (GPIO4) держат замкнутой прямо сейчас.
+    bool weatherButtonPressedNow = isWeatherButtonPressed();
+    if ((wokeByWeatherButton || weatherButtonPressedNow) && settings.weatherEnabled) {
+      drawWeatherInfoScreen(display,
+                            outdoorTemperature,
+                            weatherFeelsLikeC,
+                            weatherPressureHpa,
+                            weatherHumidityPct,
+                            weatherWindSpeedMs,
+                            settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER);
+      delay((uint32_t)settings.weatherScreenSeconds * 1000UL);
+    }
+
     drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
   } else {
     display.clearDisplay();
@@ -1097,12 +1143,23 @@ void enterDeepSleep(uint32_t sleepSeconds) {
   if (sleepSeconds == 0) {
     sleepSeconds = 60;
   }
+  // Разрешаем пробуждение замыканием WEATHER_BUTTON_PIN (GPIO4) на GND (LOW).
+  pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
+  gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
+  gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
+  esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
 }
 
 void setup() {
   Serial.begin(9600);
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  wokeByWeatherButton = false;
+  if (wakeCause == ESP_SLEEP_WAKEUP_GPIO) {
+    uint64_t wakeMask = esp_sleep_get_gpio_wakeup_status();
+    wokeByWeatherButton = (wakeMask & (1ULL << WEATHER_BUTTON_PIN)) != 0;
+  }
 
   // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
   pinMode(LED_PIN, OUTPUT);
@@ -1156,6 +1213,10 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+  pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
+  gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
+  gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
+  Serial.printf("Weather button GPIO%d state=%d\n", WEATHER_BUTTON_PIN, digitalRead(WEATHER_BUTTON_PIN));
 
   // Загрузка настроек устройства
   loadSettings();

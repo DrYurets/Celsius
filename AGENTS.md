@@ -21,9 +21,11 @@
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep.
+   - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep; пробуждение по кнопке погоды и показ детального экрана.
 2. `WeatherAPI.h`
-   - HTTP GET к погодному API, парсинг JSON (ArduinoJson), вычисление средней температуры по нескольким датчикам, хранение outdoor температуры в RTC.
+   - HTTP GET к погодному API, парсинг JSON (ArduinoJson), усреднение датчиков Narodmon; хранение в **RTC** (`RTC_DATA_ATTR`) температуры и доп. полей для OpenWeather (давление, влажность, ветер, ощущается как).
+3. `WeatherDisplay.h`
+   - отрисовка **экрана подробной погоды** (`drawWeatherInfoScreen`) под разметку **128×64** (две колонки); данные только из уже сохранённых переменных, **без HTTP**.
 
 ## Поддерживаемые варианты экрана (ветки)
 - `main`, `correction` — дисплей **128×32** (портретная ориентация).
@@ -67,7 +69,7 @@
   - night mode start/end,
   - `syncDays`,
   - `timeCorrectionPerDay`,
-  - погода: `weatherEnabled`, `weatherApiUrl[200]`, `weatherUpdateHours`.
+  - погода: `weatherEnabled`, `weatherSource`, `weatherApiUrl[200]`, `weatherUpdateHours`, `weatherScreenSeconds` (длительность экрана подробной погоды по кнопке).
 - Адреса EEPROM:
   - SSID: `EEPROM_SSID_ADDR = 0` (64 байта)
   - Password: `EEPROM_PASS_ADDR = 64` (64 байта)
@@ -82,17 +84,24 @@
   - внутри каждого объекта ожидается поле `value` (число)
   - значения усредняются, затем округляются до целого
 - Для `weatherSource = 1` (accuweather/openweathermap current weather):
-  - ожидается корневой ключ `main`
-  - используется только `main.temp`
-  - значение округляется до целого
+  - ожидается корневой объект `main`
+  - обязательно: `main.temp` (округление до целого для основного отображения на часах)
+  - дополнительно (для экрана подробностей и RTC): при наличии в JSON — `main.pressure`, `main.humidity`, `main.feels_like`; при наличии `wind.speed` — скорость ветра (м/с)
 
 ### Интервалы обновления
 - `lastWeatherUpdate` хранится в RTC.
+- Время последнего **успешного** обновления задаётся в **`Celsius.ino`** значением **`local`** (та же шкала, что и в `shouldUpdateWeather`), а не `time(nullptr)`: libc-время не синхронизируется с `storedEpoch`, иначе интервал обновления считается неверно.
 - `shouldUpdateWeather(currentTime, updateHours)`:
   - если `lastWeatherUpdate == 0` — первое обновление происходит сразу;
   - если `updateHours == 0` или слишком большое — принудительно минимум `1` час (чтобы не обновлялось каждую минуту);
   - если последняя погода неуспешна (outdoorTemperature = NaN) — повторная попытка через 5 минут;
-  - успешное обновление соблюдает полный интервал `updateHours * 3600`.
+  - успешное обновление соблюдает полный интервал `updateHours * 3600`;
+  - если `currentTime - lastWeatherUpdate < 0` (время откатилось после NTP) — возвращает `true`, чтобы не блокировать обновление.
+
+### Экран подробной погоды (кнопка)
+- GPIO **`WEATHER_BUTTON_PIN` (GPIO4)**: замыкание на GND — пробуждение из deep sleep и/или показ детального экрана в текущем цикле (если кнопка удерживается LOW при отрисовке).
+- В `runCycle()` сначала выполняется обычная логика **fetch** (если интервал и условия позволяют), затем при `(wokeByWeatherButton || isWeatherButtonPressed()) && settings.weatherEnabled` вызывается `drawWeatherInfoScreen(...)` и пауза `weatherScreenSeconds` секунд.
+- **Повторного HTTP-запроса ради детального экрана нет**: на экран передаются значения из RTC (`outdoorTemperature`, `weatherFeelsLikeC`, `weatherPressureHpa`, `weatherHumidityPct`, `weatherWindSpeedMs`). Для **Narodmon** доп. поля после парсинга остаются `NaN` — на экране отображается `--`.
 
 ### Ограничение по времени суток
 - В `runCycle()` погодные обновления выполняются только если:
@@ -129,6 +138,7 @@
   - отрисовка indoor (tempC/hum) от SHT31,
   - `display.display()`,
   - сохранение буфера в RTC для восстановления на следующее пробуждение.
+- Экран подробной погоды (см. `WeatherDisplay.h`) — отдельный полноэкранный кадр на 128×64; не смешивать координаты с веткой 128×32 без правки разметки.
 
 ### Батарея
 - Отрисовка сейчас сделана как иконка “телефонного” типа:
