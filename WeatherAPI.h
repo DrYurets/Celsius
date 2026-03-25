@@ -14,6 +14,10 @@ void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdM
 RTC_DATA_ATTR float outdoorTemperature = NAN;
 RTC_DATA_ATTR float previousOutdoorTemperature = NAN;
 RTC_DATA_ATTR time_t lastWeatherUpdate = 0;
+RTC_DATA_ATTR float weatherPressureHpa = NAN;
+RTC_DATA_ATTR float weatherHumidityPct = NAN;
+RTC_DATA_ATTR float weatherWindSpeedMs = NAN;
+RTC_DATA_ATTR float weatherFeelsLikeC = NAN;
 
 // weatherSource:
 // 0 = narodmon (ожидается корень с "sensors": [{ "value": ... }, ...])
@@ -180,7 +184,10 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
 
           previousOutdoorTemperature = outdoorTemperature;
           outdoorTemperature = roundedTemp;
-          lastWeatherUpdate = time(nullptr);
+          weatherPressureHpa = NAN;
+          weatherHumidityPct = NAN;
+          weatherWindSpeedMs = NAN;
+          weatherFeelsLikeC = NAN;
 
           Serial.printf("[Weather] Avg=%.2f -> Outdoor temp: %.0f C\n", avgTemp, roundedTemp);
           return true;
@@ -216,7 +223,12 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
 
       previousOutdoorTemperature = outdoorTemperature;
       outdoorTemperature = round(temp);
-      lastWeatherUpdate = time(nullptr);
+      weatherPressureHpa = doc["main"]["pressure"].is<float>() ? doc["main"]["pressure"].as<float>() : NAN;
+      weatherHumidityPct = doc["main"]["humidity"].is<float>() ? doc["main"]["humidity"].as<float>() : NAN;
+      weatherFeelsLikeC = doc["main"]["feels_like"].is<float>() ? doc["main"]["feels_like"].as<float>() : NAN;
+      weatherWindSpeedMs = (doc.containsKey("wind") && doc["wind"].is<JsonObject>() && doc["wind"]["speed"].is<float>())
+                             ? doc["wind"]["speed"].as<float>()
+                             : NAN;
 
       Serial.printf("[Weather] main.temp=%.2f -> Outdoor temp: %.0f C\n", temp, outdoorTemperature);
       return true;
@@ -235,7 +247,7 @@ bool shouldUpdateWeather(time_t currentTime, uint8_t updateHours) {
   if (lastWeatherUpdate == 0) {
     return true;  // Первое обновление
   }
-  // Минимум 1 час, иначе при updateHours==0 (например из старого EEPROM) обновлялось бы каждый цикл (каждую минуту)
+  // Минимум 1 час, иначе при updateHours==0 (например из старого EEPROM) обновлялось бы каждую минуту
   if (updateHours == 0 || updateHours > 24) {
     updateHours = 1;
   }
@@ -243,7 +255,11 @@ bool shouldUpdateWeather(time_t currentTime, uint8_t updateHours) {
   // Если последнее обновление было успешным (температура валидна), используем полный период (часы)
   // Если последнее обновление было неудачным (температура NaN), используем меньший период (5 минут) для повторных попыток
   uint32_t period = isnan(outdoorTemperature) ? 300UL : updatePeriodSec;  // 300 секунд = 5 минут для повторных попыток
-  return (currentTime - lastWeatherUpdate) >= period;
+  time_t delta = currentTime - lastWeatherUpdate;
+  if (delta < 0) {
+    return true;  // время откатилось (NTP) — не блокируем обновление
+  }
+  return (uint32_t)delta >= period;
 }
 
 // Функция для получения изменения температуры
