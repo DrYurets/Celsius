@@ -23,7 +23,7 @@
 1. `Celsius.ino`
    - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep; пробуждение по кнопке погоды и показ детального экрана.
 2. `WeatherAPI.h`
-   - HTTP GET к погодному API, парсинг JSON (ArduinoJson), усреднение датчиков Narodmon; хранение в **RTC** (`RTC_DATA_ATTR`) температуры и доп. полей для OpenWeather (давление, влажность, ветер, ощущается как).
+   - HTTP GET к погодному API, парсинг JSON (ArduinoJson): **Open-Meteo** (`/v1/forecast`, блок `current`) или **OpenWeather** (`main`); хранение в **RTC** (`RTC_DATA_ATTR`) температуры, давления, влажности, ветра, ощущается как.
 3. `WeatherDisplay.h`
    - отрисовка **экрана подробной погоды** (`drawWeatherInfoScreen`) под разметку **128×64** (две колонки); данные только из уже сохранённых переменных, **без HTTP**.
 
@@ -78,15 +78,15 @@
 
 ## Погодный модуль (WeatherAPI.h)
 ### Ожидаемый формат JSON
-- Для `weatherSource = 0` (narodmon):
-  - ожидается корневой ключ `sensors`
-  - `sensors` должен быть массивом объектов
-  - внутри каждого объекта ожидается поле `value` (число)
-  - значения усредняются, затем округляются до целого
-- Для `weatherSource = 1` (accuweather/openweathermap current weather):
+- Для `weatherSource = 0` (**Open-Meteo** Forecast API, см. [документацию](https://open-meteo.com/en/docs)):
+  - ожидается объект **`current`** в корне ответа
+  - обязательно: **`temperature_2m`** (°C, округление до целого для главного экрана)
+  - опционально для RTC и детального экрана: **`apparent_temperature`**, **`relative_humidity_2m`**, **`surface_pressure`** (гПа), **`wind_speed_10m`** (желательно `wind_speed_unit=ms` в URL)
+  - дефолтный URL в проекте укорочен до **≤199 символов** (`weatherApiUrl[200]`); полный набор полей `current=` можно задать в веб-форме
+- Для `weatherSource = 1` (**OpenWeather** current weather):
   - ожидается корневой объект `main`
   - обязательно: `main.temp` (округление до целого для основного отображения на часах)
-  - дополнительно (для экрана подробностей и RTC): при наличии в JSON — `main.pressure`, `main.humidity`, `main.feels_like`; при наличии `wind.speed` — скорость ветра (м/с)
+  - дополнительно: `main.pressure`, `main.humidity`, `main.feels_like`; при наличии `wind.speed` — скорость ветра (м/с)
 
 ### Интервалы обновления
 - `lastWeatherUpdate` хранится в RTC.
@@ -101,7 +101,7 @@
 ### Экран подробной погоды (кнопка)
 - GPIO **`WEATHER_BUTTON_PIN` (GPIO4)**: замыкание на GND — пробуждение из deep sleep и/или показ детального экрана в текущем цикле (если кнопка удерживается LOW при отрисовке).
 - В `runCycle()` сначала выполняется обычная логика **fetch** (если интервал и условия позволяют), затем при `(wokeByWeatherButton || isWeatherButtonPressed()) && settings.weatherEnabled` вызывается `drawWeatherInfoScreen(...)` и пауза `weatherScreenSeconds` секунд.
-- **Повторного HTTP-запроса ради детального экрана нет**: на экран передаются значения из RTC (`outdoorTemperature`, `weatherFeelsLikeC`, `weatherPressureHpa`, `weatherHumidityPct`, `weatherWindSpeedMs`). Для **Narodmon** доп. поля после парсинга остаются `NaN` — на экране отображается `--`.
+- **Повторного HTTP-запроса ради детального экрана нет**: на экран передаются значения из RTC (`outdoorTemperature`, `weatherFeelsLikeC`, `weatherPressureHpa`, `weatherHumidityPct`, `weatherWindSpeedMs`). Если в последнем ответе API поле отсутствовало — на экране **`--`**. На детальном экране метка источника: **MET** (Open-Meteo) или **OWM** (OpenWeather).
 
 ### Ограничение по времени суток
 - В `runCycle()` погодные обновления выполняются только если:

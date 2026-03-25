@@ -3,13 +3,14 @@
 
 #include <Adafruit_SSD1306.h>
 
+// weatherSource: 0 = Open-Meteo (MET), 1 = OpenWeather (OWM) — те же константы, что в Celsius.ino
 inline void drawWeatherInfoScreen(Adafruit_SSD1306 &display,
                                   float outdoorTemp,
                                   float feelsLikeC,
                                   float pressureHpa,
                                   float humidityPct,
                                   float windSpeedMs,
-                                  bool sourceIsOpenWeather) {
+                                  uint8_t weatherSource) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -20,7 +21,7 @@ inline void drawWeatherInfoScreen(Adafruit_SSD1306 &display,
   display.print("WEATHER");
   display.setCursor(74, 0);
   display.print("SRC:");
-  display.print(sourceIsOpenWeather ? "OWM" : "NRD");
+  display.print(weatherSource == 1 ? "OWM" : "MET");
 
   // Левая колонка
   display.setCursor(0, 16);
