@@ -4,6 +4,25 @@ A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and ba
 
 ![DIY Stellar Clock](outer_view.jpg)
 
+## Branches / display variants
+
+- **main** (this document) — SSD1306 **128×32**; the sketch uses `setRotation(1)` so drawing coordinates follow a tall logical framebuffer. Optional **detailed weather** via **GPIO4** (see below); layout is implemented in **`WeatherDisplay.h`** (narrow column if `display.width() < 64`, otherwise a slightly wider multi-line block).
+- **128x64** — SSD1306 **128×64** landscape, phone-style battery icon, date+weekday on one line, and the **same GPIO4 + cached weather** idea with a **two-column** detail layout. Build from branch `128x64` if you use that panel.
+
+## Detailed weather screen (GPIO4) — `main` and `128x64`
+
+Shared behaviour (when **weather is enabled** in the web UI):
+
+- **Hardware:** Momentary contact from **GPIO4** to **GND** (internal pull-up). Wakes the ESP32-C3 from deep sleep together with the timer wakeup; you can also hold LOW during the wake cycle so the detail screen is shown.
+- **No extra HTTP request:** The detail view only displays values already stored in **RTC memory** after the last successful API response (`WeatherAPI.h`). It does not open WiFi or fetch again just because GPIO4 was pressed.
+- **Web setting:** **Weather detail screen (seconds)** — how long the detail page stays visible (1–60 s, default 10) before returning to the clock.
+- **OpenWeather:** Besides `main.temp`, the firmware stores optional `main.pressure`, `main.humidity`, `main.feels_like`, and `wind.speed` for the detail screen.
+- **Narodmon:** Only averaged outdoor temperature is parsed; extra fields are not available and show as `--` on the detail screen.
+- **Weather poll interval:** The “last update” time uses the same logical clock as the clock face (`storedEpoch` / `local`), not libc `time()`, so the configured hours-between-fetches interval stays correct.
+- **Source files:** `WeatherDisplay.h` (drawing), `WeatherAPI.h` (HTTP + JSON + RTC), `Celsius.ino` (`WEATHER_BUTTON_PIN`, `esp_deep_sleep_enable_gpio_wakeup`, `drawWeatherInfoScreen`, `weatherScreenSeconds` in EEPROM).
+
+On **main**, night mode still turns the display off for the normal clock; detail-screen timing follows the same `runCycle()` / `!night` path as the rest of the UI (see code on your branch).
+
 ## Inspiration
 
 This project is inspired by the [DIY Stellar Clock](https://sites.google.com/view/huy-materials-used/diy-stellar-clock) by Huy Vector DIY.
@@ -114,8 +133,6 @@ The device automatically enters setup mode on first boot or when WiFi credential
 - Update interval (hours) – how often to fetch weather (1–24 hours, default: 1). Updates run only when the display is on (not in night mode). After each fetch, WiFi is disconnected; it is reconnected only before the next scheduled update.
 - **Weather detail screen (seconds)** – how long the GPIO4 detail page is shown (1–60 s). Does not trigger a new network request.
 
-> **Branch `128x64`:** same idea with a larger landscape layout; use that branch if you have a 128×64 OLED.
-
 **Setup Mode Behavior:**
 
 - Device displays "Setup mode" on the OLED with SSID and IP address
@@ -190,6 +207,7 @@ The display layout is customizable via web interface:
 - **Weekday section** (optional, can be disabled): Weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU)
 - **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
 - **Bottom**: Indoor temperature (°C) and humidity (%) from SHT31 (always shown); if weather is enabled, outdoor temperature is also shown (from the configured API)
+- **Detailed weather (optional, GPIO4):** Full-screen (within the rotated 128×32 logical area) cached metrics: source label (OWM/NRD), T, feels-like, humidity, wind, pressure (mm Hg derived from hPa when available). See **Detailed weather screen (GPIO4)** above.
 
 All display elements (except battery indicator and temperature/humidity) can be toggled on/off via web interface.
 
