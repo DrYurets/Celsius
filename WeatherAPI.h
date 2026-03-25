@@ -5,7 +5,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
-// https://narodmon.com/appdoc - документация по API narodmon.ru
+// Open-Meteo Forecast API: https://open-meteo.com/en/docs
 
 // Объявление функции логирования (определена в основном файле)
 void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000);
@@ -20,8 +20,8 @@ RTC_DATA_ATTR float weatherWindSpeedMs = NAN;
 RTC_DATA_ATTR float weatherFeelsLikeC = NAN;
 
 // weatherSource:
-// 0 = narodmon (ожидается корень с "sensors": [{ "value": ... }, ...])
-// 1 = accuweather/openweathermap current weather (ожидается "main": { "temp": ... })
+// 0 = Open-Meteo /v1/forecast (объект "current" с temperature_2m и опциональными полями)
+// 1 = OpenWeather current weather (объект "main" с temp)
 bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
   // Проверка WiFi (должна быть выполнена перед вызовом, но оставляем для безопасности)
   wl_status_t wifiStatus = WiFi.status();
@@ -114,8 +114,8 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
       logToDisplay("Weather HTTP code", previewDetail);
     }
     
-    // Парсинг JSON
-    DynamicJsonDocument doc(512);
+    // Парсинг JSON (Open-Meteo ответ с метаданными крупнее ~512)
+    DynamicJsonDocument doc(1536);
     DeserializationError error = deserializeJson(doc, payload);
     
     if (error) {
@@ -141,66 +141,47 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
 
     // Парсинг в зависимости от источника
     if (weatherSource == 0) {
-      // narodmon
-      if (!doc.containsKey("sensors")) {
-        logToDisplay("Weather no data", "No 'sensors' key");
-        Serial.println("[Weather] Error: No 'sensors' key in JSON");
+      // Open-Meteo: https://open-meteo.com/en/docs — блок "current"
+      if (!doc.containsKey("current") || !doc["current"].is<JsonObject>()) {
+        logToDisplay("Weather no data", "No 'current' object");
+        Serial.println("[Weather] Error: No 'current' object in JSON");
+        return false;
+      }
+      JsonObject cur = doc["current"].as<JsonObject>();
+      if (!cur.containsKey("temperature_2m")) {
+        logToDisplay("Weather no data", "No temperature_2m");
+        Serial.println("[Weather] Error: No 'temperature_2m' in current");
         return false;
       }
 
-      if (!doc["sensors"].is<JsonArray>()) {
-        logToDisplay("Weather no data", "Sensors not array");
-        Serial.println("[Weather] Error: 'sensors' is not an array");
+      float temp = cur["temperature_2m"].as<float>();
+      if (isnan(temp)) {
+        logToDisplay("Weather no data", "Bad temperature_2m");
+        Serial.println("[Weather] Error: temperature_2m is NaN");
         return false;
       }
 
-      JsonArray sensors = doc["sensors"].as<JsonArray>();
-      snprintf(detail, sizeof(detail), "Sensors=%d", sensors.size());
-      logToDisplay("Weather HTTP code", detail);
-      Serial.printf("[Weather] Sensors in array: %d\n", sensors.size());
+      previousOutdoorTemperature = outdoorTemperature;
+      outdoorTemperature = round(temp);
+      weatherFeelsLikeC =
+        (cur.containsKey("apparent_temperature") && !cur["apparent_temperature"].isNull())
+          ? cur["apparent_temperature"].as<float>()
+          : NAN;
+      weatherHumidityPct =
+        (cur.containsKey("relative_humidity_2m") && !cur["relative_humidity_2m"].isNull())
+          ? cur["relative_humidity_2m"].as<float>()
+          : NAN;
+      weatherPressureHpa =
+        (cur.containsKey("surface_pressure") && !cur["surface_pressure"].isNull())
+          ? cur["surface_pressure"].as<float>()
+          : NAN;
+      weatherWindSpeedMs =
+        (cur.containsKey("wind_speed_10m") && !cur["wind_speed_10m"].isNull())
+          ? cur["wind_speed_10m"].as<float>()
+          : NAN;
 
-      if (sensors.size() > 0) {
-        float sum = 0.0;
-        int count = 0;
-
-        for (JsonObject sensor : sensors) {
-          if (sensor.containsKey("value")) {
-            float value = sensor["value"].as<float>();
-            if (!isnan(value)) {
-              sum += value;
-              count++;
-              Serial.printf("[Weather] Sensor value: %.2f\n", value);
-            }
-          }
-        }
-
-        snprintf(detail, sizeof(detail), "Values=%d", count);
-        logToDisplay("Weather HTTP code", detail);
-        Serial.printf("[Weather] Valid values count: %d\n", count);
-
-        if (count > 0) {
-          float avgTemp = sum / count;
-          float roundedTemp = round(avgTemp);
-
-          previousOutdoorTemperature = outdoorTemperature;
-          outdoorTemperature = roundedTemp;
-          weatherPressureHpa = NAN;
-          weatherHumidityPct = NAN;
-          weatherWindSpeedMs = NAN;
-          weatherFeelsLikeC = NAN;
-
-          Serial.printf("[Weather] Avg=%.2f -> Outdoor temp: %.0f C\n", avgTemp, roundedTemp);
-          return true;
-        } else {
-          logToDisplay("Weather no data", "No valid values");
-          Serial.println("[Weather] Error: No valid temperature values");
-          return false;
-        }
-      } else {
-        logToDisplay("Weather no data", "Sensors array empty");
-        Serial.println("[Weather] Error: Sensors array is empty");
-        return false;
-      }
+      Serial.printf("[Weather] Open-Meteo T=%.2f -> Outdoor temp: %.0f C\n", temp, outdoorTemperature);
+      return true;
     } else {
       // OpenWeather (accuweather/openweathermap current weather)
       if (!doc.containsKey("main") || !doc["main"].is<JsonObject>()) {
@@ -247,7 +228,7 @@ bool shouldUpdateWeather(time_t currentTime, uint8_t updateHours) {
   if (lastWeatherUpdate == 0) {
     return true;  // Первое обновление
   }
-  // Минимум 1 час, иначе при updateHours==0 (например из старого EEPROM) обновлялось бы каждую минуту
+  // Минимум 1 час, иначе при updateHours==0 (например из старого EEPROM) обновлялось бы каждый цикл (каждую минуту)
   if (updateHours == 0 || updateHours > 24) {
     updateHours = 1;
   }

@@ -1,27 +1,34 @@
 # DIY Stellar Clock - Celsius Version
 
-A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on a 128×32 OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
+A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on an OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
 
 ![DIY Stellar Clock](outer_view.jpg)
 
-## Branches / display variants
+## Branches / Display variants
 
-- **main** (this document) — SSD1306 **128×32**; the sketch uses `setRotation(1)` so drawing coordinates follow a tall logical framebuffer. Optional **detailed weather** via **GPIO4** (see below); layout is implemented in **`WeatherDisplay.h`** (narrow column if `display.width() < 64`, otherwise a slightly wider multi-line block).
-- **128x64** — SSD1306 **128×64** landscape, phone-style battery icon, date+weekday on one line, and the **same GPIO4 + cached weather** idea with a **two-column** detail layout. Build from branch `128x64` if you use that panel.
+- **main**, **correction** — SSD1306 **128×32**; в скетче `setRotation(1)` — «высокий» логический кадр. Та же **подробная погода по GPIO4**, что и здесь: пробуждение замыканием на GND, данные только из **RTC** после последнего успешного запроса (`WeatherAPI.h`). Вёрстка детального экрана в **`WeatherDisplay.h`**: узкая колонка или более широкий блок в зависимости от `display.width()`.
+- **128x64** (ветка этого README) — SSD1306 **128×64** в **альбомной** ориентации. Тот же **GPIO4**, те же поля в RTC, но **двухколоночная** разметка детальной погоды под высоту 64 px в `WeatherDisplay.h`.
 
-## Detailed weather screen (GPIO4) — `main` and `128x64`
+  **Дополнительно в ветке 128x64 (по сравнению с main):**
+  - **Индикатор заряда** — иконка батарейки с заливкой уровня; **правый верхний** угол (`display.width()`).
+  - **Дата и день недели в одну строку** — например `26.01  ПН`.
+  - Разметка часов и `SCREEN_WIDTH` / `SCREEN_HEIGHT` под 128×64 landscape.
 
-Shared behaviour (when **weather is enabled** in the web UI):
+## Detailed weather screen (GPIO4) — main & 128x64
 
-- **Hardware:** Momentary contact from **GPIO4** to **GND** (internal pull-up). Wakes the ESP32-C3 from deep sleep together with the timer wakeup; you can also hold LOW during the wake cycle so the detail screen is shown.
-- **No extra HTTP request:** The detail view only displays values already stored in **RTC memory** after the last successful API response (`WeatherAPI.h`). It does not open WiFi or fetch again just because GPIO4 was pressed.
-- **Web setting:** **Weather detail screen (seconds)** — how long the detail page stays visible (1–60 s, default 10) before returning to the clock.
-- **OpenWeather:** Besides `main.temp`, the firmware stores optional `main.pressure`, `main.humidity`, `main.feels_like`, and `wind.speed` for the detail screen.
-- **Narodmon:** Only averaged outdoor temperature is parsed; extra fields are not available and show as `--` on the detail screen.
-- **Weather poll interval:** The “last update” time uses the same logical clock as the clock face (`storedEpoch` / `local`), not libc `time()`, so the configured hours-between-fetches interval stays correct.
-- **Source files:** `WeatherDisplay.h` (drawing), `WeatherAPI.h` (HTTP + JSON + RTC), `Celsius.ino` (`WEATHER_BUTTON_PIN`, `esp_deep_sleep_enable_gpio_wakeup`, `drawWeatherInfoScreen`, `weatherScreenSeconds` in EEPROM).
+Одинаковая логика на обеих ветках (если в веб-интерфейсе включена погода):
 
-On **main**, night mode still turns the display off for the normal clock; detail-screen timing follows the same `runCycle()` / `!night` path as the rest of the UI (see code on your branch).
+| Topic | Details |
+|--------|---------|
+| **Hardware** | **GPIO4** to **GND** (internal pull-up). Short pulse wakes the ESP32-C3 from deep sleep (GPIO wakeup + timer). You can hold LOW during the wake cycle so the detail screen is shown. |
+| **No extra HTTP** | The detail view reads **RTC-backed** values from the last successful weather fetch only. It does **not** turn on WiFi or call the API again for GPIO4 alone. |
+| **Web UI** | **Weather screen timeout** / **Weather detail screen (seconds)** — 1–60 s (default 10); EEPROM field `weatherScreenSeconds`. |
+| **OpenWeather** | `main.temp` plus optional `main.pressure`, `main.humidity`, `main.feels_like`, `wind.speed`. |
+| **Open-Meteo** | `current.temperature_2m` plus optional `apparent_temperature`, `relative_humidity_2m`, `surface_pressure`, `wind_speed_10m` (use `wind_speed_unit=ms` in URL). See [Open-Meteo docs](https://open-meteo.com/en/docs). |
+| **Poll interval** | `lastWeatherUpdate` uses the same time base as the clock (`local` / `storedEpoch`), not libc `time()`. |
+| **Source files** | `WeatherDisplay.h` (layout differs by branch), `WeatherAPI.h`, `Celsius.ino` (`WEATHER_BUTTON_PIN`, GPIO deep sleep wakeup, `drawWeatherInfoScreen`). |
+
+**This branch (128x64):** detail screen — two columns (T / FL / H left, W / P right), labels **MET** (Open-Meteo) vs **OWM** (OpenWeather). **Branch main:** compact layout for the rotated 128×32 module — see README on `main`.
 
 ## Inspiration
 
@@ -30,14 +37,14 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 ## Hardware Components
 
 - **ESP32-C3** - Main microcontroller
-- **OLED Display** - SSD1306, 128x32 pixels
+- **OLED Display** - SSD1306, 128×32 or 128×64 pixels (см. ветку **128x64** для альбомной ориентации 128×64)
 - **SHT31-D Sensor** - Temperature and humidity sensor
 - **LED** - Status indicator (blinks at the start of each hour)
 - **Type-C Charging Module** - Power management
 - **Battery** - 18350B or similar 3.7V lithium battery
 - **Resistors** - Two 100 kΩ resistors for voltage divider (battery monitoring on GPIO 3)
 - **Switch** - Power control
-- **Optional: weather detail button** - momentary contact **GPIO 4** to GND (internal pull-up): wakes from deep sleep and shows a **cached** detailed weather screen (`WeatherDisplay.h`; no extra HTTP request)
+- **Optional: weather button** - momentary switch (or wire to GND): **GPIO4** (`WEATHER_BUTTON_PIN`) with internal pull-up — wake from deep sleep + detailed weather screen
 - **Copper Wire** - Connections
 
 ## Software Requirements
@@ -63,7 +70,7 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 ## Features
 
 - **Time & Date** – Hours/minutes with customizable display options (12/24-hour format, date, weekday)
-- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption); optional outdoor temperature from a weather API (Narodmon or AccuWeather/OpenWeather)
+- **Environment** – Temperature / humidity from SHT31 (single-shot mode for lower consumption); optional outdoor temperature from **Open-Meteo** or **OpenWeather** (configurable URL)
 - **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
 - **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid; configurable sync period (1-30 days via web interface)
 - **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync)
@@ -72,8 +79,8 @@ This project is inspired by the [DIY Stellar Clock](https://sites.google.com/vie
 - **Customizable Display** – Toggle date, weekday, time format (12/24h), debug codes, and weekday language (English/Russian)
 - **Configurable Night Mode** – Customizable start and end times for night mode (display and LED off)
 - **Hourly LED Blink** – Optional status LED blink at the start of each hour (can be disabled)
-- **Outdoor Weather (optional)** – Fetch outdoor temperature from a configurable API URL (default: OpenWeather); update interval 1–24 hours; WiFi only for the request; updates when the display is on (not in night mode). OpenWeather responses also store pressure, humidity, “feels like”, and wind in RTC for the detail view.
-- **Detailed weather on GPIO4** – Short **GPIO 4** to GND to wake and show cached outdoor metrics for a few seconds (configurable **Weather detail screen** timeout in the web UI). Layout adapts to the logical display size after `setRotation(1)` on the 128×32 module.
+- **Outdoor Weather (optional)** – Configurable API URL; presets **Open-Meteo** ([Forecast API](https://open-meteo.com/en/docs)) or **OpenWeather**; update interval 1–24 hours; WiFi only for the request; updates when the display is on (not in night mode). **Interval timing** uses `storedEpoch` / `local`, not libc `time()`. Both providers can fill pressure, humidity, feels-like, and wind in RTC for the **detailed weather screen** (no extra HTTP when opening that screen).
+- **Detailed weather screen (GPIO4, main & 128x64)** – GPIO4→GND: full-screen **cached** outdoor summary for `weatherScreenSeconds` (web UI). **128x64** uses a two-column layout; **main** uses a compact layout — see **Detailed weather screen (GPIO4)** above.
 - **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
 - **Status Codes (optional)** – Two-character diagnostic codes (A1, B2, …) can be enabled via web interface
 
@@ -125,13 +132,12 @@ The device automatically enters setup mode on first boot or when WiFi credential
 
 **Weather Settings:**
 - Enable weather data (checkbox) – show outdoor temperature from an API on the display
-- Weather source – `Narodmon` or `AccuWeather (OpenWeather)`
-- Weather API URL – full URL for the selected weather source
-  - Narodmon expects JSON with a `sensors` array and `value` field per sensor (values are averaged and rounded)
-  - OpenWeather expects `main.temp` (required); optional fields for the detail screen: `main.pressure`, `main.humidity`, `main.feels_like`, `wind.speed`
-  - Example documentation: [OpenWeather current weather data](https://openweathermap.org/current?collection=current_forecast)
+- Weather source – **Open-Meteo** or **OpenWeather**
+- Weather API URL – full URL for the selected source (max length **199 characters** — keep Open-Meteo URLs compact or omit optional query params; extend in the web UI if needed)
+  - **Open-Meteo:** `https://api.open-meteo.com/v1/forecast?...` with `current=` variables (at minimum `temperature_2m`; recommend `relative_humidity_2m`, `surface_pressure`, `apparent_temperature`, `wind_speed_10m` and `wind_speed_unit=ms`). Response uses a **`current`** object. Documentation: [Open-Meteo API](https://open-meteo.com/en/docs).
+  - **OpenWeather:** JSON with `main.temp` (required); optional: `main.pressure`, `main.humidity`, `main.feels_like`, `wind.speed` (m/s). [OpenWeather current weather](https://openweathermap.org/current?collection=current_forecast)
 - Update interval (hours) – how often to fetch weather (1–24 hours, default: 1). Updates run only when the display is on (not in night mode). After each fetch, WiFi is disconnected; it is reconnected only before the next scheduled update.
-- **Weather detail screen (seconds)** – how long the GPIO4 detail page is shown (1–60 s). Does not trigger a new network request.
+- **Weather screen timeout / detail screen (seconds)** – how long the GPIO4 detail view stays on screen after wake or while the pin is held (1–60 s, default: 10). Does **not** trigger a network request by itself.
 
 **Setup Mode Behavior:**
 
@@ -179,7 +185,7 @@ Most settings can be configured via web interface. The following settings can on
 - **I2C SDA**: GPIO 8
 - **I2C SCL**: GPIO 9
 - **LED**: GPIO 0
-- **Weather detail (optional)**: GPIO 4 – connect to GND to wake and show cached detailed weather
+- **Weather / detail screen button** (optional): GPIO 4 — connect to GND to wake and show cached detailed weather (internal pull-up)
 - **Battery Monitor**: GPIO 3 (ADC with 11dB attenuation, 0-2.5V range) - requires voltage divider with two 100 kΩ resistors (1:1 ratio)
 - **OLED Address**: 0x3C
 - **SHT31 Address**: 0x44
@@ -203,11 +209,10 @@ Most settings can be configured via web interface. The following settings can on
 The display layout is customizable via web interface:
 
 - **Top**: 5-bar battery indicator (always shown)
-- **Date section** (optional, can be disabled): Date in DD.MM format
-- **Weekday section** (optional, can be disabled): Weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU)
+- **Date and weekday** (optional, can be disabled): Date in DD.MM format; weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU). В ветке **128x64** дата и день недели в одной строке: дата слева, день недели сразу после даты (например `26.01  ПН`); индикатор заряда — иконка батарейки в правом верхнем углу.
 - **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
 - **Bottom**: Indoor temperature (°C) and humidity (%) from SHT31 (always shown); if weather is enabled, outdoor temperature is also shown (from the configured API)
-- **Detailed weather (optional, GPIO4):** Full-screen (within the rotated 128×32 logical area) cached metrics: source label (OWM/NRD), T, feels-like, humidity, wind, pressure (mm Hg derived from hPa when available). See **Detailed weather screen (GPIO4)** above.
+- **Detailed weather (optional, GPIO4):** On **128x64**, separate screen after GPIO4 wake or while LOW — T, feels-like, humidity, wind (m/s), pressure (mm Hg from hPa); **MET** vs **OWM**; **cached** RTC data only (two-column layout in `WeatherDisplay.h`). On **main**, the same data with a compact layout for 128×32 + rotation — see README on `main`.
 
 All display elements (except battery indicator and temperature/humidity) can be toggled on/off via web interface.
 
@@ -222,8 +227,7 @@ All display elements (except battery indicator and temperature/humidity) can be 
 - **Night Mode**: Night mode times are fully configurable via web interface (start and end hours/minutes). During night mode, the display and LED are turned off to save power.
 - **Display Customization**: All display elements (date, weekday, time format, debug codes) can be toggled on/off via web interface. Weekday language can be switched between English and Russian.
 - **Weather & WiFi**: When weather is enabled, the device connects to WiFi only when it is time to update weather (and when the display is on). After the HTTP request, WiFi is disconnected and switched off (`WiFi.disconnect(true)` and `WiFi.mode(WIFI_OFF)`), so the radio is not left on between updates. On the next scheduled update, WiFi is connected again. This keeps power usage low.
-- **Weather interval**: The firmware records the last successful poll using the same logical time as the clock (`local` / `storedEpoch`), not libc `time()`, so the hourly interval stays consistent.
-- **GPIO4 detail screen**: Shows data already stored in RTC from the last successful API response; opening it does not start another HTTP request.
+- **Weather interval & detailed screen**: The “last update” timestamp uses the same logical clock as the clock face (`local` / `storedEpoch`). Opening the detailed weather view does **not** start another fetch; it only shows RTC values from the last successful response (Open-Meteo and OpenWeather both supply the fields used on the detail screen when present in the URL/response).
 - Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
 - Status codes are disabled by default; can be enabled via web interface for quick troubleshooting directly on the OLED.
 

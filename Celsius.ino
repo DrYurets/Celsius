@@ -35,9 +35,9 @@
 #define NIGHT_END_H 7
 
 // Источники погоды
-// 0 = narodmon (JSON с корнем "sensors": [{ "value": ... }, ...])
-// 1 = accuweather/openweathermap current weather (JSON с "main": { "temp": ... })
-#define WEATHER_SOURCE_NARODMON 0
+// 0 = Open-Meteo /v1/forecast (JSON: объект "current", поле temperature_2m)
+// 1 = OpenWeather current weather (JSON: "main": { "temp": ... })
+#define WEATHER_SOURCE_OPEN_METEO 0
 #define WEATHER_SOURCE_ACCUWEATHER 1
 
 // ---------- батарея ----------
@@ -132,7 +132,7 @@ struct DeviceSettings {
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
   uint8_t syncDays;              // количество суток между синхронизациями NTP
   bool weatherEnabled;           // включить получение погоды
-  uint8_t weatherSource;         // 0=narodmon, 1=accuweather/openweathermap
+  uint8_t weatherSource;         // 0=Open-Meteo, 1=OpenWeather
   char weatherApiUrl[200];       // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана подробной погоды по GPIO4
@@ -309,12 +309,12 @@ void loadSettings() {
   }
   EEPROM.end();
 
-  // Дефолтные URL для разных источников
-  const char *defaultNarodmonUrl = "https://api.narodmon.com/?cmd=sensorsValues&api_key=xcHX1858McCHS&sensors=32277,61922&uuid=00f3694f782462152b5a548b2af0f2c4&lang=en&trends=1";
+  const char *defaultOpenMeteoUrl =
+    "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&current=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m&wind_speed_unit=ms";
   const char *defaultAccuWeatherUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru";
 
   // На случай чтения мусора из EEPROM после изменения структуры
-  if (settings.weatherSource != WEATHER_SOURCE_NARODMON && settings.weatherSource != WEATHER_SOURCE_ACCUWEATHER) {
+  if (settings.weatherSource != WEATHER_SOURCE_OPEN_METEO && settings.weatherSource != WEATHER_SOURCE_ACCUWEATHER) {
     settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
   }
 
@@ -344,7 +344,7 @@ void loadSettings() {
   settings.weatherApiUrl[199] = '\0';
   size_t urlLen = strnlen(settings.weatherApiUrl, 200);
   const char *expectedNeedle =
-    (settings.weatherSource == WEATHER_SOURCE_NARODMON) ? "cmd=sensorsValues" : "/data/2.5/weather";
+    (settings.weatherSource == WEATHER_SOURCE_OPEN_METEO) ? "open-meteo.com/v1/forecast" : "/data/2.5/weather";
 
   bool urlInvalid = (urlLen == 0 || urlLen >= 199 ||
                      strncmp(settings.weatherApiUrl, "http", 4) != 0 ||
@@ -352,7 +352,7 @@ void loadSettings() {
 
   if (urlInvalid) {
     strcpy(settings.weatherApiUrl,
-           (settings.weatherSource == WEATHER_SOURCE_NARODMON) ? defaultNarodmonUrl : defaultAccuWeatherUrl);
+           (settings.weatherSource == WEATHER_SOURCE_OPEN_METEO) ? defaultOpenMeteoUrl : defaultAccuWeatherUrl);
   }
 
   // Валидация weatherUpdateHours
@@ -438,8 +438,8 @@ String getConfigPage() {
   html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + "'>";
   html += "<label>Weather source:</label>";
   html += "<select name='weatherSource' style='width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box;'>";
-  html += "<option value='narodmon' " + String(settings.weatherSource == WEATHER_SOURCE_NARODMON ? "selected" : "") + ">Narodmon</option>";
-  html += "<option value='accuweather' " + String(settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER ? "selected" : "") + ">AccuWeather (OpenWeather)</option>";
+  html += "<option value='openmeteo' " + String(settings.weatherSource == WEATHER_SOURCE_OPEN_METEO ? "selected" : "") + ">Open-Meteo</option>";
+  html += "<option value='accuweather' " + String(settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER ? "selected" : "") + ">OpenWeather</option>";
   html += "</select>";
 
   html += "<label>Weather API URL:</label>";
@@ -564,8 +564,8 @@ void handleSave() {
     if (server.hasArg("weatherSource")) {
       String src = server.arg("weatherSource");
       src.trim();
-      if (src == "narodmon") {
-        settings.weatherSource = WEATHER_SOURCE_NARODMON;
+      if (src == "openmeteo" || src == "narodmon") {
+        settings.weatherSource = WEATHER_SOURCE_OPEN_METEO;
       } else if (src == "accuweather") {
         settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
       }
@@ -1074,7 +1074,7 @@ uint32_t runCycle() {
                             weatherPressureHpa,
                             weatherHumidityPct,
                             weatherWindSpeedMs,
-                            settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER);
+                            settings.weatherSource);
       delay((uint32_t)settings.weatherScreenSeconds * 1000UL);
     }
 

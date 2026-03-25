@@ -21,15 +21,15 @@
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep; на ветке **main** — пробуждение по **GPIO4** и показ подробной погоды.
+   - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep; пробуждение по кнопке погоды и показ детального экрана.
 2. `WeatherAPI.h`
-   - HTTP GET к погодному API, парсинг JSON (ArduinoJson), усреднение Narodmon; в RTC хранятся температура и (для OpenWeather) давление, влажность, ветер, ощущается как.
+   - HTTP GET к погодному API, парсинг JSON (ArduinoJson): **Open-Meteo** (`/v1/forecast`, блок `current`) или **OpenWeather** (`main`); хранение в **RTC** (`RTC_DATA_ATTR`) температуры, давления, влажности, ветра, ощущается как.
 3. `WeatherDisplay.h`
-   - `drawWeatherInfoScreen`: подробный экран из **кэша RTC** (без HTTP). На **main** (`setRotation(1)`, логически узкий портрет) при `display.width() < 64` — одна колонка коротких строк; при ширине ≥ 64 — компактные многострочные блоки. На **128x64** — своя двухколоночная вёрстка под 64 px высоты (см. ветку).
+   - отрисовка **экрана подробной погоды** (`drawWeatherInfoScreen`); разметка зависит от ветки (**128×32** — адаптивно по `display.width()`; **128×64** — две колонки); данные только из уже сохранённых переменных, **без HTTP**.
 
 ## Поддерживаемые варианты экрана (ветки)
-- `main`, `correction` — панель **SSD1306 128×32**, в коде часто `setRotation(1)` (логическая область рисования «высокая»). Подробная погода: **GPIO4** → GND, настройка `weatherScreenSeconds`.
-- `128x64` — дисплей **128×64** в **альбомной** ориентации; разметка даты/дня недели и экран погоды под эту высоту.
+- `main`, `correction` — дисплей **128×32** (портретная ориентация).
+- `128x64` — дисплей **128×64** в **альбомной ориентации** (landscape). В этой ветке разметка адаптирована под 128×64 (и есть улучшения отображения даты/дня недели).
 
 При разработке нового функционала важно учитывать, что в коде могут быть координаты/ориентация/размеры, рассчитанные под конкретный вариант экрана. Сначала выбери правильную ветку.
 
@@ -69,7 +69,7 @@
   - night mode start/end,
   - `syncDays`,
   - `timeCorrectionPerDay`,
-  - погода: `weatherEnabled`, `weatherSource`, `weatherApiUrl[200]`, `weatherUpdateHours`, `weatherScreenSeconds`.
+  - погода: `weatherEnabled`, `weatherSource`, `weatherApiUrl[200]`, `weatherUpdateHours`, `weatherScreenSeconds` (длительность экрана подробной погоды по кнопке).
 - Адреса EEPROM:
   - SSID: `EEPROM_SSID_ADDR = 0` (64 байта)
   - Password: `EEPROM_PASS_ADDR = 64` (64 байта)
@@ -78,26 +78,30 @@
 
 ## Погодный модуль (WeatherAPI.h)
 ### Ожидаемый формат JSON
-- Для `weatherSource = 0` (narodmon):
-  - ожидается корневой ключ `sensors`
-  - `sensors` должен быть массивом объектов
-  - внутри каждого объекта ожидается поле `value` (число)
-  - значения усредняются, затем округляются до целого
-- Для `weatherSource = 1` (accuweather/openweathermap current weather):
-  - ожидается объект `main`; обязательно `main.temp` (округление для главного экрана);
-  - дополнительно в RTC: `main.pressure`, `main.humidity`, `main.feels_like`, при наличии `wind.speed`.
+- Для `weatherSource = 0` (**Open-Meteo** Forecast API, см. [документацию](https://open-meteo.com/en/docs)):
+  - ожидается объект **`current`** в корне ответа
+  - обязательно: **`temperature_2m`** (°C, округление до целого для главного экрана)
+  - опционально для RTC и детального экрана: **`apparent_temperature`**, **`relative_humidity_2m`**, **`surface_pressure`** (гПа), **`wind_speed_10m`** (желательно `wind_speed_unit=ms` в URL)
+  - дефолтный URL в проекте укорочен до **≤199 символов** (`weatherApiUrl[200]`); полный набор полей `current=` можно задать в веб-форме
+- Для `weatherSource = 1` (**OpenWeather** current weather):
+  - ожидается корневой объект `main`
+  - обязательно: `main.temp` (округление до целого для основного отображения на часах)
+  - дополнительно: `main.pressure`, `main.humidity`, `main.feels_like`; при наличии `wind.speed` — скорость ветра (м/с)
 
 ### Интервалы обновления
-- `lastWeatherUpdate` хранится в RTC; после **успешного** fetch задаётся в `Celsius.ino` как **`local`** (та же шкала, что `shouldUpdateWeather`), не `time(nullptr)`.
+- `lastWeatherUpdate` хранится в RTC.
+- Время последнего **успешного** обновления задаётся в **`Celsius.ino`** значением **`local`** (та же шкала, что и в `shouldUpdateWeather`), а не `time(nullptr)`: libc-время не синхронизируется с `storedEpoch`, иначе интервал обновления считается неверно.
 - `shouldUpdateWeather(currentTime, updateHours)`:
   - если `lastWeatherUpdate == 0` — первое обновление происходит сразу;
   - если `updateHours == 0` или слишком большое — принудительно минимум `1` час (чтобы не обновлялось каждую минуту);
   - если последняя погода неуспешна (outdoorTemperature = NaN) — повторная попытка через 5 минут;
   - успешное обновление соблюдает полный интервал `updateHours * 3600`;
-  - если `currentTime - lastWeatherUpdate < 0` — возвращает `true`.
+  - если `currentTime - lastWeatherUpdate < 0` (время откатилось после NTP) — возвращает `true`, чтобы не блокировать обновление.
 
-### Экран подробной погоды (GPIO4)
-- `WEATHER_BUTTON_PIN` = **GPIO4** (замыкание на GND): `esp_deep_sleep_enable_gpio_wakeup` + в `runCycle()` при `wokeByWeatherButton || isWeatherButtonPressed()` вызывается `drawWeatherInfoScreen`, пауза `weatherScreenSeconds`. Отдельного HTTP нет.
+### Экран подробной погоды (кнопка)
+- GPIO **`WEATHER_BUTTON_PIN` (GPIO4)**: замыкание на GND — пробуждение из deep sleep и/или показ детального экрана в текущем цикле (если кнопка удерживается LOW при отрисовке).
+- В `runCycle()` сначала выполняется обычная логика **fetch** (если интервал и условия позволяют), затем при `(wokeByWeatherButton || isWeatherButtonPressed()) && settings.weatherEnabled` вызывается `drawWeatherInfoScreen(...)` и пауза `weatherScreenSeconds` секунд.
+- **Повторного HTTP-запроса ради детального экрана нет**: на экран передаются значения из RTC (`outdoorTemperature`, `weatherFeelsLikeC`, `weatherPressureHpa`, `weatherHumidityPct`, `weatherWindSpeedMs`). Если в последнем ответе API поле отсутствовало — на экране **`--`**. На детальном экране метка источника: **MET** (Open-Meteo) или **OWM** (OpenWeather).
 
 ### Ограничение по времени суток
 - В `runCycle()` погодные обновления выполняются только если:
@@ -125,16 +129,29 @@
 ## Отображение на OLED
 ### Рисование
 - Дисплей: `Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1)`.
-- В `drawClock(...)` (зависит от ветки): батарея, дата/день недели, время, outdoor/indoor, `display.display()`, сохранение буфера в RTC.
-- Подробная погода: `WeatherDisplay.h` / `drawWeatherInfoScreen` — координаты под фактические `display.width()`/`height()` после `setRotation`.
+- В `drawClock(...)` выполняется:
+  - `display.clearDisplay()`,
+  - отрисовка индикатора батареи,
+  - отрисовка даты/дня недели (в одной строке),
+  - отрисовка времени (крупный шрифт),
+  - отрисовка outdoor (если включено и есть данные),
+  - отрисовка indoor (tempC/hum) от SHT31,
+  - `display.display()`,
+  - сохранение буфера в RTC для восстановления на следующее пробуждение.
+- Экран подробной погоды (см. `WeatherDisplay.h`) — отдельный полноэкранный кадр на 128×64; не смешивать координаты с веткой 128×32 без правки разметки.
 
-### Батарея / дата (зависят от ветки)
-- **main / correction**: см. текущий `drawBattery` и разметку `drawClock` в `Celsius.ino` ветки.
-- **128x64**: иконка батареи, дата и день недели в одной строке — см. ветку `128x64`.
+### Батарея
+- Отрисовка сейчас сделана как иконка “телефонного” типа:
+  - контур корпуса + «носик»,
+  - заполнение по уровню (пропорционально `bars`).
+- Иконка привязана к правому верхнему краю (через `display.width()`).
+
+### Дата и день недели
+- В текущей разметке выполнено “дата + день недели в одной строке”: день недели выводится сразу после даты.
 
 ## Последовательность работы на устройстве
 ### setup()
-1. Инициализация Serial; определение причины пробуждения (в т.ч. GPIO4 для погоды).
+1. Инициализация Serial.
 2. Подготовка LED_PIN / проверка аппаратного сброса (GPIO0 замкнут).
 3. I2C / OLED init.
 4. Инициализация SHT31.

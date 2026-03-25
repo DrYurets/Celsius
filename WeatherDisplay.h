@@ -7,13 +7,14 @@
 // При display.width() >= 64 — компактные многострочные строки «в ширину»;
 // иначе — одна колонка коротких меток (T, FL, H, W, P).
 
+// weatherSource: 0 = Open-Meteo (MET), 1 = OpenWeather (OWM)
 inline void drawWeatherInfoScreen(Adafruit_SSD1306 &display,
                                   float outdoorTemp,
                                   float feelsLikeC,
                                   float pressureHpa,
                                   float humidityPct,
                                   float windSpeedMs,
-                                  bool sourceIsOpenWeather) {
+                                  uint8_t weatherSource) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -24,7 +25,7 @@ inline void drawWeatherInfoScreen(Adafruit_SSD1306 &display,
   if (w >= 64) {
     display.setCursor(0, 0);
     display.print("WEATHER ");
-    display.print(sourceIsOpenWeather ? "OWM" : "NRD");
+    display.print(weatherSource == 1 ? "OWM" : "MET");
 
     display.setCursor(0, 10);
     display.print("T:");
@@ -69,7 +70,7 @@ inline void drawWeatherInfoScreen(Adafruit_SSD1306 &display,
     const int dy = 10;
     int y = 0;
     display.setCursor(0, y);
-    display.print(sourceIsOpenWeather ? "OWM" : "NRD");
+    display.print(weatherSource == 1 ? "OWM" : "MET");
     y += dy;
 
     display.setCursor(0, y);
