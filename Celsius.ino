@@ -40,6 +40,8 @@
 // 1 = OpenWeather current weather (JSON: "main": { "temp": ... })
 #define WEATHER_SOURCE_OPEN_METEO 0
 #define WEATHER_SOURCE_ACCUWEATHER 1
+#define WEEKDAY_MASK_ALL 0x7F
+#define WEEKDAY_MASK_WORKDAYS 0x1F
 
 // ---------- батарея ----------
 #define BAT_V_MAX 4.0f
@@ -137,6 +139,7 @@ struct DeviceSettings {
   char weatherApiUrl[200];       // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
+  uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
 };
 
 static DeviceSettings settings = {
@@ -156,7 +159,8 @@ static DeviceSettings settings = {
   .weatherSource = WEATHER_SOURCE_ACCUWEATHER,
   .weatherApiUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru",
   .weatherUpdateHours = 1,
-  .weatherScreenSeconds = 10
+  .weatherScreenSeconds = 10,
+  .activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS
 };
 
 static bool sensorOK = false;
@@ -175,6 +179,19 @@ bool isNight(int h, int m = 0) {
     return currentMinutes >= startMinutes && currentMinutes < endMinutes;
   }
   return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+}
+
+uint8_t weekdayBitFromTmWday(int tmWday) {
+  // tm_wday: 0=Sun,1=Mon,...,6=Sat -> mask bit: 0=Mon,...,6=Sun
+  if (tmWday == 0) {
+    return (1U << 6);
+  }
+  return (1U << (tmWday - 1));
+}
+
+bool isWeekdayEnabled(int tmWday) {
+  uint8_t dayBit = weekdayBitFromTmWday(tmWday);
+  return (settings.activeWeekdaysMask & dayBit) != 0;
 }
 
 bool hasValidTime(time_t epoch) {
@@ -341,6 +358,7 @@ void loadSettings() {
     strcpy(settings.weatherApiUrl, defaultAccuWeatherUrl);
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
+    settings.activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS;
   }
 
   // Валидация инициализации URL (на случай повреждения EEPROM/старой прошивки/обрезки)
@@ -365,6 +383,7 @@ void loadSettings() {
   if (settings.weatherScreenSeconds == 0 || settings.weatherScreenSeconds > 60) {
     settings.weatherScreenSeconds = 10;
   }
+  settings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
 }
 
 void saveSettings() {
@@ -425,6 +444,15 @@ String getConfigPage() {
   html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
   html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
   html += "</div>";
+
+  html += "<h2>Work Days</h2>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdMon' " + String((settings.activeWeekdaysMask & (1U << 0)) ? "checked" : "") + "><label>Mon</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdTue' " + String((settings.activeWeekdaysMask & (1U << 1)) ? "checked" : "") + "><label>Tue</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdWed' " + String((settings.activeWeekdaysMask & (1U << 2)) ? "checked" : "") + "><label>Wed</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdThu' " + String((settings.activeWeekdaysMask & (1U << 3)) ? "checked" : "") + "><label>Th</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdFri' " + String((settings.activeWeekdaysMask & (1U << 4)) ? "checked" : "") + "><label>Fr</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdSat' " + String((settings.activeWeekdaysMask & (1U << 5)) ? "checked" : "") + "><label>Sat</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='wdSun' " + String((settings.activeWeekdaysMask & (1U << 6)) ? "checked" : "") + "><label>Su</label></div>";
 
   html += "<h2>NTP Sync Settings</h2>";
   html += "<label>Days between NTP syncs:</label>";
@@ -560,6 +588,16 @@ void handleSave() {
         settings.syncDays = days;
       }
     }
+
+    uint8_t weekdaysMask = 0;
+    if (server.hasArg("wdMon")) weekdaysMask |= (1U << 0);
+    if (server.hasArg("wdTue")) weekdaysMask |= (1U << 1);
+    if (server.hasArg("wdWed")) weekdaysMask |= (1U << 2);
+    if (server.hasArg("wdThu")) weekdaysMask |= (1U << 3);
+    if (server.hasArg("wdFri")) weekdaysMask |= (1U << 4);
+    if (server.hasArg("wdSat")) weekdaysMask |= (1U << 5);
+    if (server.hasArg("wdSun")) weekdaysMask |= (1U << 6);
+    settings.activeWeekdaysMask = weekdaysMask & WEEKDAY_MASK_ALL;
 
     // Обработка настроек погоды
     settings.weatherEnabled = server.hasArg("weatherEnabled");
@@ -1024,9 +1062,10 @@ uint32_t runCycle() {
 #endif
 
   bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
+  bool workdayEnabled = timeValid ? isWeekdayEnabled(ti.tm_wday) : true;
 
   // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
-  if (settings.weatherEnabled && timeValid && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+  if (settings.weatherEnabled && timeValid && workdayEnabled && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
 
@@ -1084,7 +1123,7 @@ uint32_t runCycle() {
 
   if (!timeValid) {
     logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
-  } else if (!night) {
+  } else if (!night && workdayEnabled) {
     setDisplayState(true);
     setBrightness(0x01);
 
@@ -1109,7 +1148,7 @@ uint32_t runCycle() {
     setDisplayState(false);
   }
 
-  if (timeValid && (ti.tm_min == 0) && !night && settings.hourlyBlink) {
+  if (timeValid && workdayEnabled && (ti.tm_min == 0) && !night && settings.hourlyBlink) {
     digitalWrite(LED_PIN, HIGH);
     delay(80);
     digitalWrite(LED_PIN, LOW);
@@ -1117,11 +1156,18 @@ uint32_t runCycle() {
 
   uint32_t sleepSeconds = 60;
   if (timeValid) {
-    int secToNextMinute = 60 - ti.tm_sec;
-    if (secToNextMinute <= 0) {
-      secToNextMinute = 60;
+    if (!workdayEnabled) {
+      sleepSeconds = (uint32_t)((23 - ti.tm_hour) * 3600 + (59 - ti.tm_min) * 60 + (60 - ti.tm_sec));
+      if (sleepSeconds == 0) {
+        sleepSeconds = 60;
+      }
+    } else {
+      int secToNextMinute = 60 - ti.tm_sec;
+      if (secToNextMinute <= 0) {
+        secToNextMinute = 60;
+      }
+      sleepSeconds = (uint32_t)secToNextMinute;
     }
-    sleepSeconds = (uint32_t)secToNextMinute;
     uint32_t activeSeconds = ((millis() - cycleStartMs) + 500) / 1000;
     uint32_t elapsedSeconds = activeSeconds + sleepSeconds;
 
