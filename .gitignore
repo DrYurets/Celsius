@@ -1,3 +1,23 @@
 .vscode/
 .env
 .theia
+
+# Build artifacts
+#build/
+*.bin
+*.elf
+*.map
+*.hex
+*.tmp
+
+# Arduino / ESP32 export artifacts
+*.partitions.bin
+*.bootloader.bin
+*.merged.bin
+boot_app0.bin
+build.options.json
+flash_args
+partitions.csv
+sdkconfig
+
+!build/esp32.esp32.esp32c3/Celsius.ino.bin

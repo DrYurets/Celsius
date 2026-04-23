@@ -11,6 +11,8 @@
 #include <driver/gpio.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+#include <Update.h>
+#include <AutoOTA.h>
 #include "WeatherAPI.h"
 #include "WeatherDisplay.h"
 
@@ -51,6 +53,13 @@
 #define OLED_BUFFER_SIZE ((SCREEN_WIDTH * SCREEN_HEIGHT) / 8)
 
 #define SHOW_DEBUG_CODES 0
+#define AUTOOTA_ENABLED 1
+#define AUTOOTA_BRANCH "aht20bmp280"  // OTA channel: branch with matching hardware layout
+#define AUTOOTA_MANIFEST_URL "https://raw.githubusercontent.com/DrYurets/Celsius/" AUTOOTA_BRANCH "/project.json"
+#define AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT 24
+#define AUTOOTA_CHECK_INTERVAL_HOURS_MIN 1
+#define AUTOOTA_CHECK_INTERVAL_HOURS_MAX 168
+#define AUTOOTA_MIN_BATTERY_V 3.20f
 
 // ---------- коды сообщений ----------
 #define CODE_WIFI_CONNECT "Wi-Fi connecting ..."      // подключение к Wi-Fi
@@ -115,10 +124,15 @@ RTC_DATA_ATTR uint8_t displayBackup[OLED_BUFFER_SIZE];
 RTC_DATA_ATTR bool displayBackupValid = false;
 RTC_DATA_ATTR int32_t driftCorrectionMs = 0;
 RTC_DATA_ATTR time_t lastSyncLocalEpoch = 0;
+RTC_DATA_ATTR time_t lastAutoOtaCheckEpoch = 0;
 
 static char wifiSSID[64] = "";
 static char wifiPassword[64] = "";
 static bool configMode = false;
+static bool otaUpdateStarted = false;
+static bool otaUpdateSuccess = false;
+static String otaUpdateError;
+AutoOTA autoOta(ROM_VERSION, AUTOOTA_MANIFEST_URL);
 
 // Структура настроек устройства
 struct DeviceSettings {
@@ -139,6 +153,8 @@ struct DeviceSettings {
   char weatherApiUrl[200];       // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
+  bool autoOtaEnabled;           // автоматическая проверка и установка OTA
+  uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
 };
 
@@ -160,6 +176,8 @@ static DeviceSettings settings = {
   .weatherApiUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru",
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
+  .autoOtaEnabled = true,
+  .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
   .activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS
 };
 
@@ -358,6 +376,8 @@ void loadSettings() {
     strcpy(settings.weatherApiUrl, defaultAccuWeatherUrl);
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
+    settings.autoOtaEnabled = true;
+    settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS;
   }
 
@@ -383,6 +403,11 @@ void loadSettings() {
   if (settings.weatherScreenSeconds == 0 || settings.weatherScreenSeconds > 60) {
     settings.weatherScreenSeconds = 10;
   }
+  if (settings.autoOtaCheckHours < AUTOOTA_CHECK_INTERVAL_HOURS_MIN ||
+      settings.autoOtaCheckHours > AUTOOTA_CHECK_INTERVAL_HOURS_MAX) {
+    settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
+  }
+  settings.autoOtaEnabled = settings.autoOtaEnabled ? true : false;
   settings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
 }
 
@@ -842,6 +867,79 @@ float readBattery() {
   return mv * 2.0f / 1000.0f;  // делитель 1:1 → Вольты
 }
 
+static bool shouldCheckAutoOta(time_t local, bool timeValid, bool night, bool workdayEnabled) {
+#if AUTOOTA_ENABLED
+  if (!settings.autoOtaEnabled || !timeValid || night || !workdayEnabled) {
+    return false;
+  }
+  uint32_t intervalSec = (uint32_t)settings.autoOtaCheckHours * 3600UL;
+  if (intervalSec == 0) {
+    intervalSec = (uint32_t)AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT * 3600UL;
+  }
+  if (lastAutoOtaCheckEpoch == 0) {
+    return true;
+  }
+  time_t delta = local - lastAutoOtaCheckEpoch;
+  if (delta < 0) {
+    return true;
+  }
+  return delta >= (time_t)intervalSec;
+#else
+  (void)local;
+  (void)timeValid;
+  (void)night;
+  (void)workdayEnabled;
+  return false;
+#endif
+}
+
+static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled) {
+#if AUTOOTA_ENABLED
+  if (!shouldCheckAutoOta(local, timeValid, night, workdayEnabled)) {
+    return;
+  }
+  lastAutoOtaCheckEpoch = local;
+
+  float vBat = readBattery();
+  if (vBat < AUTOOTA_MIN_BATTERY_V) {
+    Serial.printf("[AutoOTA] Skipped: battery %.2fV < %.2fV\n", vBat, AUTOOTA_MIN_BATTERY_V);
+    return;
+  }
+
+  String newVersion;
+  String notes;
+  String binPath;
+  bool hasInfo = autoOta.checkUpdate(&newVersion, &notes, &binPath);
+  if (!hasInfo) {
+    if (autoOta.hasError()) {
+      Serial.printf("[AutoOTA] checkUpdate error: %d\n", (int)autoOta.getError());
+    } else {
+      Serial.println("[AutoOTA] checkUpdate: no update info");
+    }
+    return;
+  }
+  if (!autoOta.hasUpdate()) {
+    Serial.println("[AutoOTA] No update");
+    return;
+  }
+
+  Serial.printf("[AutoOTA] Update found: %s -> %s\n", ROM_VERSION, newVersion.c_str());
+  if (!notes.isEmpty()) {
+    Serial.printf("[AutoOTA] Notes: %s\n", notes.c_str());
+  }
+  Serial.printf("[AutoOTA] Bin: %s\n", binPath.c_str());
+  bool ok = autoOta.updateNow();
+  if (!ok && autoOta.hasError()) {
+    Serial.printf("[AutoOTA] updateNow error: %d\n", (int)autoOta.getError());
+  }
+#else
+  (void)local;
+  (void)timeValid;
+  (void)night;
+  (void)workdayEnabled;
+#endif
+}
+
 // Иконка батареи (как на телефоне): контур + заполнение по уровню заряда, в правом верхнем углу
 void drawBattery(uint8_t bars) {
   const int16_t bodyW = 20;
@@ -1098,6 +1196,14 @@ uint32_t runCycle() {
     logToDisplay(CODE_WEATHER_FETCH, detail);
 
     if (wifiStatus == WL_CONNECTED) {
+      ntpSyncOverConnectedWiFi();
+      local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
+      local = applyTimeCorrection(local, lastSyncLocalEpoch);
+      timeValid = hasValidTime(local);
+      if (timeValid) {
+        localtime_r(&local, &ti);
+      }
+      tryAutoOtaUpdate(local, timeValid, night, workdayEnabled);
       bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
       if (success) {
         lastWeatherUpdate = local;  // та же шкала, что в shouldUpdateWeather() (не time(nullptr) — libc не синхронизирован с storedEpoch)
