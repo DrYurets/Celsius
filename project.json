@@ -8,7 +8,7 @@
       "chipFamily": "ESP32-C3",
       "parts": [
         {
-          "path": "https://raw.githubusercontent.com/DrYurets/Celsius/aht20bmp280/Celsius.ino.bin",
+          "path": "https://raw.githubusercontent.com/DrYurets/Celsius/aht20bmp280/build/esp32.esp32.esp32c3/Celsius.ino.bin",
           "offset": 0
         }
       ]
