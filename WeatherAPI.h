@@ -4,11 +4,35 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <cmath>
 
 // Open-Meteo Forecast API: https://open-meteo.com/en/docs
 
 // Объявление функции логирования (определена в основном файле)
 void logToDisplay(const char *code, const char *detail = nullptr, uint16_t holdMs = 1000);
+
+// В JSON число может быть int или float; as<double>() в ArduinoJson приводит и то и другое надёжнее, чем только as<float>().
+static inline float weatherJsonFloatOrNan(JsonObject obj, const char *key) {
+  if (!obj.containsKey(key)) {
+    return NAN;
+  }
+  JsonVariant v = obj[key];
+  if (v.isNull()) {
+    return NAN;
+  }
+  return (float)v.as<double>();
+}
+
+static inline int32_t weatherJsonIntOrNeg1(JsonObject obj, const char *key) {
+  if (!obj.containsKey(key)) {
+    return -1;
+  }
+  JsonVariant v = obj[key];
+  if (v.isNull()) {
+    return -1;
+  }
+  return v.as<int32_t>();
+}
 
 // Переменные для хранения температуры
 RTC_DATA_ATTR float outdoorTemperature = NAN;
@@ -17,12 +41,49 @@ RTC_DATA_ATTR time_t lastWeatherUpdate = 0;
 RTC_DATA_ATTR float weatherPressureHpa = NAN;
 RTC_DATA_ATTR float weatherHumidityPct = NAN;
 RTC_DATA_ATTR float weatherWindSpeedMs = NAN;
+RTC_DATA_ATTR float weatherWindDirectionDeg = NAN;
 RTC_DATA_ATTR float weatherFeelsLikeC = NAN;
+// Open-Meteo WMO weather_code (current.weather_code)
+RTC_DATA_ATTR int32_t weatherWmoCode = -1;
+RTC_DATA_ATTR float weatherPrecipProbabilityPct = NAN;
+RTC_DATA_ATTR int32_t weatherDailyWmoCode[4] = { -1, -1, -1, -1 };
+RTC_DATA_ATTR float weatherDailyTempMaxC[4] = { NAN, NAN, NAN, NAN };
+RTC_DATA_ATTR float weatherDailyTempMinC[4] = { NAN, NAN, NAN, NAN };
+RTC_DATA_ATTR float weatherDailyWindDayMs[4] = { NAN, NAN, NAN, NAN };
+RTC_DATA_ATTR float weatherDailyPrecipDayPct[4] = { NAN, NAN, NAN, NAN };
+RTC_DATA_ATTR float weatherNearestNightMinC = NAN;
+RTC_DATA_ATTR int32_t weatherNearestNightWmoCode = -1;
 
-// weatherSource:
-// 0 = Open-Meteo /v1/forecast (объект "current" с temperature_2m и опциональными полями)
-// 1 = OpenWeather current weather (объект "main" с temp)
+static inline bool isLeapYear(int y) {
+  return ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
+}
+
+static inline bool nextDateIso10(const String &isoDate, String &nextDate) {
+  if (isoDate.length() < 10) return false;
+  int y = isoDate.substring(0, 4).toInt();
+  int m = isoDate.substring(5, 7).toInt();
+  int d = isoDate.substring(8, 10).toInt();
+  if (y < 1970 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+  static const uint8_t mdays[] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+  int dim = mdays[m - 1];
+  if (m == 2 && isLeapYear(y)) dim = 29;
+  d++;
+  if (d > dim) {
+    d = 1;
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+  }
+  char buf[11];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
+  nextDate = String(buf);
+  return true;
+}
+
 bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
+  (void)weatherSource;  // источник фиксирован: Open-Meteo
   // Проверка WiFi (должна быть выполнена перед вызовом, но оставляем для безопасности)
   wl_status_t wifiStatus = WiFi.status();
   if (wifiStatus != WL_CONNECTED) {
@@ -114,8 +175,8 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
       logToDisplay("Weather HTTP code", previewDetail);
     }
     
-    // Парсинг JSON (Open-Meteo ответ с метаданными крупнее ~512)
-    DynamicJsonDocument doc(1536);
+    // URL теперь может включать current+hourly+daily на 3 дня, поэтому буфер JSON заметно больше.
+    DynamicJsonDocument doc(65536);
     DeserializationError error = deserializeJson(doc, payload);
     
     if (error) {
@@ -139,81 +200,246 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
       Serial.println("[Weather] JSON keys: " + keys);
     }
 
-    // Парсинг в зависимости от источника
-    if (weatherSource == 0) {
-      // Open-Meteo: https://open-meteo.com/en/docs — блок "current"
-      if (!doc.containsKey("current") || !doc["current"].is<JsonObject>()) {
-        logToDisplay("Weather no data", "No 'current' object");
-        Serial.println("[Weather] Error: No 'current' object in JSON");
-        return false;
-      }
-      JsonObject cur = doc["current"].as<JsonObject>();
-      if (!cur.containsKey("temperature_2m")) {
-        logToDisplay("Weather no data", "No temperature_2m");
-        Serial.println("[Weather] Error: No 'temperature_2m' in current");
-        return false;
-      }
-
-      float temp = cur["temperature_2m"].as<float>();
-      if (isnan(temp)) {
-        logToDisplay("Weather no data", "Bad temperature_2m");
-        Serial.println("[Weather] Error: temperature_2m is NaN");
-        return false;
-      }
-
-      previousOutdoorTemperature = outdoorTemperature;
-      outdoorTemperature = round(temp);
-      weatherFeelsLikeC =
-        (cur.containsKey("apparent_temperature") && !cur["apparent_temperature"].isNull())
-          ? cur["apparent_temperature"].as<float>()
-          : NAN;
-      weatherHumidityPct =
-        (cur.containsKey("relative_humidity_2m") && !cur["relative_humidity_2m"].isNull())
-          ? cur["relative_humidity_2m"].as<float>()
-          : NAN;
-      weatherPressureHpa =
-        (cur.containsKey("surface_pressure") && !cur["surface_pressure"].isNull())
-          ? cur["surface_pressure"].as<float>()
-          : NAN;
-      weatherWindSpeedMs =
-        (cur.containsKey("wind_speed_10m") && !cur["wind_speed_10m"].isNull())
-          ? cur["wind_speed_10m"].as<float>()
-          : NAN;
-
-      Serial.printf("[Weather] Open-Meteo T=%.2f -> Outdoor temp: %.0f C\n", temp, outdoorTemperature);
-      return true;
-    } else {
-      // OpenWeather (accuweather/openweathermap current weather)
-      if (!doc.containsKey("main") || !doc["main"].is<JsonObject>()) {
-        logToDisplay("Weather no data", "No 'main' object");
-        Serial.println("[Weather] Error: No 'main' object in JSON");
-        return false;
-      }
-      if (!doc["main"].containsKey("temp")) {
-        logToDisplay("Weather no data", "No 'main.temp'");
-        Serial.println("[Weather] Error: No 'main.temp' key in JSON");
-        return false;
-      }
-
-      float temp = doc["main"]["temp"].as<float>();
-      if (isnan(temp)) {
-        logToDisplay("Weather no data", "Bad 'main.temp'");
-        Serial.println("[Weather] Error: 'main.temp' is NaN");
-        return false;
-      }
-
-      previousOutdoorTemperature = outdoorTemperature;
-      outdoorTemperature = round(temp);
-      weatherPressureHpa = doc["main"]["pressure"].is<float>() ? doc["main"]["pressure"].as<float>() : NAN;
-      weatherHumidityPct = doc["main"]["humidity"].is<float>() ? doc["main"]["humidity"].as<float>() : NAN;
-      weatherFeelsLikeC = doc["main"]["feels_like"].is<float>() ? doc["main"]["feels_like"].as<float>() : NAN;
-      weatherWindSpeedMs = (doc.containsKey("wind") && doc["wind"].is<JsonObject>() && doc["wind"]["speed"].is<float>())
-                             ? doc["wind"]["speed"].as<float>()
-                             : NAN;
-
-      Serial.printf("[Weather] main.temp=%.2f -> Outdoor temp: %.0f C\n", temp, outdoorTemperature);
-      return true;
+    // Open-Meteo: https://open-meteo.com/en/docs — блок "current"
+    if (!doc.containsKey("current") || !doc["current"].is<JsonObject>()) {
+      logToDisplay("Weather no data", "No 'current' object");
+      Serial.println("[Weather] Error: No 'current' object in JSON");
+      return false;
     }
+    JsonObject cur = doc["current"].as<JsonObject>();
+    if (!cur.containsKey("temperature_2m")) {
+      logToDisplay("Weather no data", "No temperature_2m");
+      Serial.println("[Weather] Error: No 'temperature_2m' in current");
+      return false;
+    }
+
+    float temp = cur["temperature_2m"].as<float>();
+    if (isnan(temp)) {
+      logToDisplay("Weather no data", "Bad temperature_2m");
+      Serial.println("[Weather] Error: temperature_2m is NaN");
+      return false;
+    }
+
+    previousOutdoorTemperature = outdoorTemperature;
+    outdoorTemperature = round(temp);
+    weatherFeelsLikeC =
+      (cur.containsKey("apparent_temperature") && !cur["apparent_temperature"].isNull())
+        ? cur["apparent_temperature"].as<float>()
+        : NAN;
+    weatherHumidityPct =
+      (cur.containsKey("relative_humidity_2m") && !cur["relative_humidity_2m"].isNull())
+        ? cur["relative_humidity_2m"].as<float>()
+        : NAN;
+    weatherPressureHpa =
+      (cur.containsKey("surface_pressure") && !cur["surface_pressure"].isNull())
+        ? cur["surface_pressure"].as<float>()
+        : NAN;
+    if (cur.containsKey("wind_speed_10m") && !cur["wind_speed_10m"].isNull()) {
+      float w = cur["wind_speed_10m"].as<float>();
+      bool useMs = false;
+      if (doc.containsKey("current_units") && doc["current_units"].is<JsonObject>()) {
+        JsonObject cu = doc["current_units"].as<JsonObject>();
+        if (cu.containsKey("wind_speed_10m")) {
+          String u = cu["wind_speed_10m"].as<String>();
+          if (u.indexOf("m/s") >= 0) {
+            useMs = true;
+          }
+        }
+      }
+      weatherWindSpeedMs = useMs ? w : (w / 3.6f);
+    } else {
+      weatherWindSpeedMs = NAN;
+    }
+    weatherWindDirectionDeg = weatherJsonFloatOrNan(cur, "wind_direction_10m");
+    weatherWmoCode = weatherJsonIntOrNeg1(cur, "weather_code");
+    weatherPrecipProbabilityPct = NAN;
+
+    weatherNearestNightMinC = NAN;
+    weatherNearestNightWmoCode = -1;
+
+    if (doc.containsKey("hourly") && doc["hourly"].is<JsonObject>() &&
+        cur.containsKey("time") && !cur["time"].isNull()) {
+      JsonObject hourly = doc["hourly"].as<JsonObject>();
+      if (hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
+          hourly.containsKey("precipitation_probability") && hourly["precipitation_probability"].is<JsonArray>()) {
+        JsonArray times = hourly["time"].as<JsonArray>();
+        JsonArray probs = hourly["precipitation_probability"].as<JsonArray>();
+        String currentIso = cur["time"].as<String>();
+        String currentHour = currentIso;
+        if (currentHour.length() >= 13) {
+          currentHour = currentHour.substring(0, 13);
+        }
+        size_t n = times.size();
+        if (probs.size() < n) n = probs.size();
+        for (size_t i = 0; i < n; ++i) {
+          JsonVariant t = times[i];
+          if (!t.isNull()) {
+            String hourlyIso = t.as<String>();
+            bool exactMatch = (currentIso == hourlyIso);
+            bool sameHourMatch = (!exactMatch && currentHour.length() >= 13 && hourlyIso.length() >= 13 &&
+                                  currentHour == hourlyIso.substring(0, 13));
+            if (!exactMatch && !sameHourMatch) {
+              continue;
+            }
+            if (!probs[i].isNull()) {
+              weatherPrecipProbabilityPct = probs[i].as<float>();
+            }
+            break;
+          }
+        }
+      }
+
+      // Минимум ближайшей ночи: от 21:00 сегодняшнего дня до 08:59 следующего.
+      if (hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
+          hourly.containsKey("temperature_2m") && hourly["temperature_2m"].is<JsonArray>()) {
+        JsonArray hTime = hourly["time"].as<JsonArray>();
+        JsonArray hTemp = hourly["temperature_2m"].as<JsonArray>();
+        JsonArray hCode;
+        bool hasCode = hourly.containsKey("weather_code") && hourly["weather_code"].is<JsonArray>();
+        if (hasCode) hCode = hourly["weather_code"].as<JsonArray>();
+
+        String curIso = cur["time"].as<String>(); // YYYY-MM-DDTHH:MM
+        if (curIso.length() >= 13) {
+          String d0 = curIso.substring(0, 10);
+          String d1;
+          if (nextDateIso10(d0, d1)) {
+            size_t n = hTime.size();
+            if (hTemp.size() < n) n = hTemp.size();
+            if (hasCode && hCode.size() < n) n = hCode.size();
+            for (size_t i = 0; i < n; ++i) {
+              if (hTime[i].isNull() || hTemp[i].isNull()) continue;
+              String tIso = hTime[i].as<String>();
+              if (tIso.length() < 13) continue;
+              String d = tIso.substring(0, 10);
+              int hh = tIso.substring(11, 13).toInt();
+              bool inNight = ((d == d0 && hh >= 21) || (d == d1 && hh <= 8));
+              if (!inNight) continue;
+              float t = hTemp[i].as<float>();
+              if (isnan(weatherNearestNightMinC) || t < weatherNearestNightMinC) {
+                weatherNearestNightMinC = t;
+                if (hasCode && !hCode[i].isNull()) weatherNearestNightWmoCode = hCode[i].as<int32_t>();
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (uint8_t i = 0; i < 4; ++i) {
+      weatherDailyWmoCode[i] = -1;
+      weatherDailyTempMaxC[i] = NAN;
+      weatherDailyTempMinC[i] = NAN;
+      weatherDailyWindDayMs[i] = NAN;
+      weatherDailyPrecipDayPct[i] = NAN;
+    }
+    if (doc.containsKey("daily") && doc["daily"].is<JsonObject>()) {
+      JsonObject daily = doc["daily"].as<JsonObject>();
+      if (daily.containsKey("weather_code") && daily["weather_code"].is<JsonArray>()) {
+        JsonArray a = daily["weather_code"].as<JsonArray>();
+        for (uint8_t i = 0; i < 4 && i < a.size(); ++i) {
+          if (!a[i].isNull()) weatherDailyWmoCode[i] = a[i].as<int32_t>();
+        }
+      }
+      if (daily.containsKey("temperature_2m_max") && daily["temperature_2m_max"].is<JsonArray>()) {
+        JsonArray a = daily["temperature_2m_max"].as<JsonArray>();
+        for (uint8_t i = 0; i < 4 && i < a.size(); ++i) if (!a[i].isNull()) weatherDailyTempMaxC[i] = a[i].as<float>();
+      }
+      if (daily.containsKey("temperature_2m_min") && daily["temperature_2m_min"].is<JsonArray>()) {
+        JsonArray a = daily["temperature_2m_min"].as<JsonArray>();
+        for (uint8_t i = 0; i < 4 && i < a.size(); ++i) if (!a[i].isNull()) weatherDailyTempMinC[i] = a[i].as<float>();
+      }
+
+      // Если в daily не запрошены temperature_2m_max/min, вычисляем их из hourly.temperature_2m по датам daily.time.
+      bool needDerivedTemps = false;
+      for (uint8_t i = 0; i < 4; ++i) {
+        if (isnan(weatherDailyTempMaxC[i]) || isnan(weatherDailyTempMinC[i])) {
+          needDerivedTemps = true;
+          break;
+        }
+      }
+      if (needDerivedTemps &&
+          daily.containsKey("time") && daily["time"].is<JsonArray>() &&
+          doc.containsKey("hourly") && doc["hourly"].is<JsonObject>()) {
+        JsonArray dayTime = daily["time"].as<JsonArray>();
+        JsonObject hourly = doc["hourly"].as<JsonObject>();
+        if (hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
+            hourly.containsKey("temperature_2m") && hourly["temperature_2m"].is<JsonArray>()) {
+          JsonArray hTime = hourly["time"].as<JsonArray>();
+          JsonArray hTemp = hourly["temperature_2m"].as<JsonArray>();
+          size_t hn = hTime.size();
+          if (hTemp.size() < hn) hn = hTemp.size();
+
+          for (uint8_t di = 0; di < 4 && di < dayTime.size(); ++di) {
+            if (dayTime[di].isNull()) continue;
+            String dayIso = dayTime[di].as<String>(); // YYYY-MM-DD
+            if (dayIso.length() < 10) continue;
+            float minT = NAN, maxT = NAN;
+            for (size_t hi = 0; hi < hn; ++hi) {
+              if (hTime[hi].isNull() || hTemp[hi].isNull()) continue;
+              String hIso = hTime[hi].as<String>(); // YYYY-MM-DDTHH:MM
+              if (hIso.length() < 10 || hIso.substring(0, 10) != dayIso) continue;
+              float t = hTemp[hi].as<float>();
+              if (isnan(minT) || t < minT) minT = t;
+              if (isnan(maxT) || t > maxT) maxT = t;
+            }
+            if (!isnan(minT)) weatherDailyTempMinC[di] = minT;
+            if (!isnan(maxT)) weatherDailyTempMaxC[di] = maxT;
+          }
+        }
+      }
+
+      // Дневные показатели (09:00..18:59): средняя скорость ветра и max вероятность осадков.
+      if (daily.containsKey("time") && daily["time"].is<JsonArray>() &&
+          doc.containsKey("hourly") && doc["hourly"].is<JsonObject>()) {
+        JsonArray dayTime = daily["time"].as<JsonArray>();
+        JsonObject hourly = doc["hourly"].as<JsonObject>();
+        if (hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
+            hourly.containsKey("wind_speed_10m") && hourly["wind_speed_10m"].is<JsonArray>() &&
+            hourly.containsKey("precipitation_probability") && hourly["precipitation_probability"].is<JsonArray>()) {
+          JsonArray hTime = hourly["time"].as<JsonArray>();
+          JsonArray hWind = hourly["wind_speed_10m"].as<JsonArray>();
+          JsonArray hPop = hourly["precipitation_probability"].as<JsonArray>();
+          size_t hn = hTime.size();
+          if (hWind.size() < hn) hn = hWind.size();
+          if (hPop.size() < hn) hn = hPop.size();
+
+          for (uint8_t di = 0; di < 4 && di < dayTime.size(); ++di) {
+            if (dayTime[di].isNull()) continue;
+            String dayIso = dayTime[di].as<String>(); // YYYY-MM-DD
+            if (dayIso.length() < 10) continue;
+            float windSum = 0.0f;
+            uint16_t windCnt = 0;
+            float popMax = NAN;
+            for (size_t hi = 0; hi < hn; ++hi) {
+              if (hTime[hi].isNull()) continue;
+              String hIso = hTime[hi].as<String>();
+              if (hIso.length() < 13 || hIso.substring(0, 10) != dayIso) continue;
+              int hh = hIso.substring(11, 13).toInt();
+              if (hh < 9 || hh > 18) continue;
+
+              if (!hWind[hi].isNull()) {
+                windSum += hWind[hi].as<float>();
+                windCnt++;
+              }
+              if (!hPop[hi].isNull()) {
+                float p = hPop[hi].as<float>();
+                if (isnan(popMax) || p > popMax) popMax = p;
+              }
+            }
+            if (windCnt > 0) weatherDailyWindDayMs[di] = windSum / (float)windCnt;
+            if (!isnan(popMax)) weatherDailyPrecipDayPct[di] = popMax;
+          }
+        }
+      }
+    }
+
+    Serial.printf("[Weather] Open-Meteo T=%.2f -> Outdoor temp: %.0f C, wind_dir=%.1f°, WMO=%ld, PoP=%.0f%%\n",
+                  temp,
+                  outdoorTemperature,
+                  weatherWindDirectionDeg,
+                  (long)weatherWmoCode,
+                  weatherPrecipProbabilityPct);
+    return true;
   } else {
     snprintf(detail, sizeof(detail), "HTTP err=%d", httpCode);
     logToDisplay("Weather HTTP err", detail);

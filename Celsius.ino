@@ -1,12 +1,22 @@
+/*
+* Celsius Clock (ESP32-C3)
+* https://github.com/DrYurets/Celsius/tree/aht20bmp280
+* 
+* Date: 22.04.2026
+* Copyright (c) 2026 DrYurets
+*/
+
 #include <Wire.h>
+#include <cmath>
+#include <cstdarg>
 #include <cstring>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <GyverOLED.h>
 #include <Adafruit_SHT31.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <esp_sleep.h>
+#include <esp_ota_ops.h>
 #include <driver/adc.h>
 #include <driver/gpio.h>
 #include <WebServer.h>
@@ -14,47 +24,53 @@
 #include <Update.h>
 #include <AutoOTA.h>
 #include "WeatherAPI.h"
-#include "WeatherDisplay.h"
+#include "WeatherDetailScreens.h"
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-// SSID 64 + PASS 64 + Settings (struct ~224 байт, weatherApiUrl[200]). Запас под рост.
+#define ROM_VERSION "A1.1.7"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
-#define EEPROM_SIZE 512
+#define EEPROM_SIZE 2048
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
+#define SSD1306_WHITE 1
+#define SSD1306_SWITCHCAPVCC 0
 #define SHT31_ADDR 0x44
 #define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
 #define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
 #define LED_PIN 0
+#define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
+#define BMI160_INT1_PIN 5
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
 
 #define NIGHT_START_H 23
 #define NIGHT_END_H 7
 
-// Источники погоды
+// Источник погоды фиксирован: Open-Meteo
 // 0 = Open-Meteo /v1/forecast (JSON: объект "current", поле temperature_2m)
-// 1 = OpenWeather current weather (JSON: "main": { "temp": ... })
 #define WEATHER_SOURCE_OPEN_METEO 0
-#define WEATHER_SOURCE_ACCUWEATHER 1
+#define UI_LANG_RU 0
+#define UI_LANG_EN 1
 #define WEEKDAY_MASK_ALL 0x7F
 #define WEEKDAY_MASK_WORKDAYS 0x1F
+#define WEATHER_API_URL_BUF_SIZE 768  // запас для расширенного Open-Meteo URL (current+hourly+daily)
+#define DEFAULT_WEATHER_LAT 53.92f
+#define DEFAULT_WEATHER_LON 30.35f
 
 // ---------- батарея ----------
-#define BAT_V_MAX 4.0f
-#define BAT_V_MIN 3.0f
+#define BAT_V_MAX 3.4f
+#define BAT_V_MIN 2.8f
 #define BAT_STEPS 5
 #define BATTERY_RECHECK_SEC (15UL * 60UL)
-#define OLED_BUFFER_SIZE ((SCREEN_WIDTH * SCREEN_HEIGHT) / 8)
-
+#define OTA_MIN_BATTERY_V 3.05f
 #define SHOW_DEBUG_CODES 0
 #define AUTOOTA_ENABLED 1
-#define AUTOOTA_BRANCH "aht20bmp280"  // OTA channel: branch with matching hardware layout
+#define AUTOOTA_BRANCH "128x64"  // OTA channel: branch with matching hardware layout
 #define AUTOOTA_MANIFEST_URL "https://raw.githubusercontent.com/DrYurets/Celsius/" AUTOOTA_BRANCH "/project.json"
 #define AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT 24
 #define AUTOOTA_CHECK_INTERVAL_HOURS_MIN 1
@@ -68,7 +84,7 @@
 #define CODE_NTP_OK "NTP sync ok"                     // время успешно синхронизировано
 #define CODE_NTP_ERROR "NTP error"                    // ошибка NTP
 #define CODE_SENSOR_OK "SHT Sensor found"             // датчик SHT31 найден
-#define CODE_SENSOR_MISSING "SHT Sensor not found"    // датчик SHT31 отсутствует
+#define CODE_SENSOR_MISSING "SHT Sensor missing"      // датчик SHT31 отсутствует
 #define CODE_FIRST_SYNC "First sync"                  // первая синхронизация
 #define CODE_SETUP_DONE "Setup done"                  // завершение setup
 #define CODE_MEASURE_INFO "Battery Measure info"      // минутное измерение батареи
@@ -89,8 +105,79 @@
 #define CODE_WEATHER_HTTP_ERROR "Weather HTTP err"    // ошибка HTTP запроса
 #define CODE_WEATHER_JSON_ERROR "Weather JSON err"    // ошибка парсинга JSON
 #define CODE_WEATHER_NO_DATA "Weather no data"        // нет данных в ответе
+#define CODE_BMI160_OK "BMI160 ok"
+#define CODE_BMI160_ERR "BMI160 fail"
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+class OledDisplayCompat {
+ public:
+  OledDisplayCompat() : oled_(OLED_ADDR) {}
+
+  bool begin(int, int) {
+    oled_.init();
+    return true;
+  }
+  void clearDisplay() { oled_.clear(); }
+  void display() { oled_.update(); }
+  void setTextSize(uint8_t size) { oled_.setScale(constrain((int)size, 1, 4)); }
+  void setTextColor(uint16_t) {}
+  void setRotation(uint8_t) {}
+  void setCursor(int16_t x, int16_t y) { oled_.setCursorXY(x, y); }
+  int16_t width() const { return SCREEN_WIDTH; }
+
+  size_t print(const char *s) { return oled_.print(s); }
+  size_t print(const String &s) { return oled_.print(s); }
+  size_t print(char c) { return oled_.print(c); }
+  size_t print(int v) { return oled_.print(v); }
+  size_t print(unsigned int v) { return oled_.print(v); }
+  size_t print(long v) { return oled_.print(v); }
+  size_t print(unsigned long v) { return oled_.print(v); }
+  size_t print(float v) { return oled_.print(v); }
+  size_t println(const char *s) { return oled_.println(s); }
+  size_t println(const String &s) { return oled_.println(s); }
+  size_t println(int v) { return oled_.println(v); }
+  size_t println(unsigned int v) { return oled_.println(v); }
+  template <typename T>
+  size_t print(const T &v) { return oled_.print(v); }
+  template <typename T>
+  size_t println(const T &v) { return oled_.println(v); }
+
+  int printf(const char *fmt, ...) {
+    char buf[64];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    oled_.print(buf);
+    return n;
+  }
+
+  void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
+    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_STROKE);
+  }
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
+    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_FILL);
+  }
+  void drawBitmap(int16_t x, int16_t y, const uint8_t *bmp, int16_t w, int16_t h, uint16_t) {
+    oled_.drawBitmap(x, y, bmp, w, h, BITMAP_NORMAL, BUF_ADD);
+  }
+
+  void ssd1306_command(uint8_t cmd) {
+    if (waitContrast_) {
+      oled_.setContrast(cmd);
+      waitContrast_ = false;
+      return;
+    }
+    if (cmd == 0x81) waitContrast_ = true;
+    else if (cmd == 0xAF) oled_.setPower(true);
+    else if (cmd == 0xAE) oled_.setPower(false);
+  }
+
+ private:
+  GyverOLED<SSD1306_128x64, OLED_BUFFER> oled_;
+  bool waitContrast_ = false;
+};
+
+OledDisplayCompat display;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 WiFiUDP ntpUDP;
 WebServer server(80);
@@ -120,7 +207,6 @@ RTC_DATA_ATTR float storedVBat = BAT_V_MAX;
 RTC_DATA_ATTR uint8_t storedBatBars = BAT_STEPS;
 RTC_DATA_ATTR time_t lastBatCheckEpoch = 0;
 RTC_DATA_ATTR uint16_t storedRawAdc = 0;
-RTC_DATA_ATTR uint8_t displayBackup[OLED_BUFFER_SIZE];
 RTC_DATA_ATTR bool displayBackupValid = false;
 RTC_DATA_ATTR int32_t driftCorrectionMs = 0;
 RTC_DATA_ATTR time_t lastSyncLocalEpoch = 0;
@@ -146,17 +232,23 @@ struct DeviceSettings {
   uint8_t nightEndH;
   uint8_t nightEndM;
   bool weekdayLanguageRu;        // true = Russian, false = English
+  uint8_t uiLanguage;            // 0=Russian, 1=English (веб-панель/будущая локализация)
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
   uint8_t syncDays;              // количество суток между синхронизациями NTP
   bool weatherEnabled;           // включить получение погоды
-  uint8_t weatherSource;         // 0=Open-Meteo, 1=OpenWeather
-  char weatherApiUrl[200];       // URL API для получения погоды
+  uint8_t weatherSource;         // legacy field, always Open-Meteo
+  float weatherLatitude;         // широта для Open-Meteo
+  float weatherLongitude;        // долгота для Open-Meteo
+  char weatherApiUrl[WEATHER_API_URL_BUF_SIZE];  // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
   bool autoOtaEnabled;           // автоматическая проверка и установка OTA
   uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
 };
+
+static_assert(EEPROM_SIZE >= (EEPROM_SETTINGS_ADDR + sizeof(DeviceSettings)),
+              "EEPROM_SIZE is too small for DeviceSettings");
 
 static DeviceSettings settings = {
   .showDebugCodes = false,
@@ -169,23 +261,146 @@ static DeviceSettings settings = {
   .nightEndH = 7,
   .nightEndM = 0,
   .weekdayLanguageRu = true,
+  .uiLanguage = UI_LANG_RU,
   .timeCorrectionPerDay = 0,
   .syncDays = 1,
-  .weatherEnabled = false,
-  .weatherSource = WEATHER_SOURCE_ACCUWEATHER,
-  .weatherApiUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru",
+  .weatherEnabled = true,
+  .weatherSource = WEATHER_SOURCE_OPEN_METEO,
+  .weatherLatitude = DEFAULT_WEATHER_LAT,
+  .weatherLongitude = DEFAULT_WEATHER_LON,
+  .weatherApiUrl = "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Europe%2FMoscow&past_days=0&forecast_days=4&wind_speed_unit=ms",
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
-  .activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS
+  .activeWeekdaysMask = WEEKDAY_MASK_ALL
 };
+
+static bool parseFloatQueryParam(const char *url, const char *key, float &outValue) {
+  if (!url || !key) {
+    return false;
+  }
+  const char *found = strstr(url, key);
+  if (!found) {
+    return false;
+  }
+  found += strlen(key);
+  char *endPtr = nullptr;
+  float value = strtof(found, &endPtr);
+  if (endPtr == found || !isfinite(value)) {
+    return false;
+  }
+  outValue = value;
+  return true;
+}
+
+static bool isValidLatitude(float lat) {
+  return isfinite(lat) && lat >= -90.0f && lat <= 90.0f;
+}
+
+static bool isValidLongitude(float lon) {
+  return isfinite(lon) && lon >= -180.0f && lon <= 180.0f;
+}
+
+static void rebuildOpenMeteoUrlFromCoordinates() {
+  snprintf(settings.weatherApiUrl,
+           WEATHER_API_URL_BUF_SIZE,
+           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Europe%%2FMoscow&past_days=0&forecast_days=4&wind_speed_unit=ms",
+           settings.weatherLatitude,
+           settings.weatherLongitude);
+}
 
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
 static bool displayOn = true;
 static bool wokeByWeatherButton = false;
+static bool wokeByMotionSensor = false;
+
+// BMI160 (минимальная конфигурация прерывания "any-motion" на INT1)
+#define BMI160_I2C_ADDR 0x68
+#define BMI160_CHIP_ID_REG 0x00
+#define BMI160_CHIP_ID 0xD1
+#define BMI160_CMD_REG 0x7E
+#define BMI160_ACC_CONF_REG 0x40
+#define BMI160_ACC_RANGE_REG 0x41
+#define BMI160_INT_EN_0_REG 0x50
+#define BMI160_INT_OUT_CTRL_REG 0x53
+#define BMI160_INT_LATCH_REG 0x54
+#define BMI160_INT_MAP_0_REG 0x55
+#define BMI160_INT_MOTION_0_REG 0x5F
+#define BMI160_INT_MOTION_1_REG 0x60
+#define BMI160_INT_STATUS_0_REG 0x1C
+
+bool bmi160WriteReg(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(BMI160_I2C_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool bmi160ReadReg(uint8_t reg, uint8_t &value) {
+  Wire.beginTransmission(BMI160_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(BMI160_I2C_ADDR, (uint8_t)1) != 1) {
+    return false;
+  }
+  value = Wire.read();
+  return true;
+}
+
+bool initBMI160MotionWake() {
+  uint8_t chipId = 0;
+  if (!bmi160ReadReg(BMI160_CHIP_ID_REG, chipId) || chipId != BMI160_CHIP_ID) {
+    return false;
+  }
+
+  // Soft reset, затем normal mode для акселерометра
+  bmi160WriteReg(BMI160_CMD_REG, 0xB6);
+  delay(15);
+  bmi160WriteReg(BMI160_CMD_REG, 0x11);
+  delay(5);
+
+  // ODR 100Hz, normal avg4, +/-4g
+  bmi160WriteReg(BMI160_ACC_CONF_REG, 0x28);
+  bmi160WriteReg(BMI160_ACC_RANGE_REG, 0x05);
+
+  // Any-motion: duration ~2 samples, threshold умеренный (против ложных срабатываний)
+  bmi160WriteReg(BMI160_INT_MOTION_0_REG, 0x02);
+  bmi160WriteReg(BMI160_INT_MOTION_1_REG, 0x14);
+
+  // Включить any-motion по X/Y/Z
+  bmi160WriteReg(BMI160_INT_EN_0_REG, 0x07);
+
+  // INT1: output enable, push-pull, active HIGH
+  // bit0=int1_output_en, bit1=int1_od, bit2=int1_lvl, bit3=int1_input_en
+  // 0x05 => output enabled, push-pull, active high
+  bmi160WriteReg(BMI160_INT_OUT_CTRL_REG, 0x05);
+
+  // Latch interrupt (удержание уровня) для надёжного wake из deep sleep
+  // 0x0F = latch until reset/status clear
+  bmi160WriteReg(BMI160_INT_LATCH_REG, 0x0F);
+
+  // Map any-motion to INT1
+  bmi160WriteReg(BMI160_INT_MAP_0_REG, 0x04);
+
+  // Диагностика: читаем обратно критичные регистры
+  uint8_t regAccConf = 0, regAccRange = 0, regIntEn0 = 0, regIntOut = 0, regLatch = 0, regMap0 = 0, regStat0 = 0;
+  bmi160ReadReg(BMI160_ACC_CONF_REG, regAccConf);
+  bmi160ReadReg(BMI160_ACC_RANGE_REG, regAccRange);
+  bmi160ReadReg(BMI160_INT_EN_0_REG, regIntEn0);
+  bmi160ReadReg(BMI160_INT_OUT_CTRL_REG, regIntOut);
+  bmi160ReadReg(BMI160_INT_LATCH_REG, regLatch);
+  bmi160ReadReg(BMI160_INT_MAP_0_REG, regMap0);
+  bmi160ReadReg(BMI160_INT_STATUS_0_REG, regStat0);
+  Serial.printf("BMI160 regs accConf=0x%02X accRange=0x%02X intEn0=0x%02X intOut=0x%02X latch=0x%02X map0=0x%02X stat0=0x%02X\n",
+                regAccConf, regAccRange, regIntEn0, regIntOut, regLatch, regMap0, regStat0);
+
+  return true;
+}
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -346,14 +561,10 @@ void loadSettings() {
   }
   EEPROM.end();
 
-  // Дефолтные URL (Open-Meteo ≤199 символов из-за weatherApiUrl[200])
-  const char *defaultOpenMeteoUrl =
-    "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&current=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m&wind_speed_unit=ms";
-  const char *defaultAccuWeatherUrl = "https://api.openweathermap.org/data/2.5/weather?lat=53.92&lon=30.35&units=metric&appid=acaecce83f68a5ec7053b270f8d1cef5&lang=ru";
-
-  // На случай чтения мусора из EEPROM после изменения структуры
-  if (settings.weatherSource != WEATHER_SOURCE_OPEN_METEO && settings.weatherSource != WEATHER_SOURCE_ACCUWEATHER) {
-    settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
+  // Источник погоды фиксирован: Open-Meteo
+  settings.weatherSource = WEATHER_SOURCE_OPEN_METEO;
+  if (settings.uiLanguage != UI_LANG_RU && settings.uiLanguage != UI_LANG_EN) {
+    settings.uiLanguage = UI_LANG_RU;
   }
 
   // Проверка валидности (магическое число)
@@ -369,32 +580,44 @@ void loadSettings() {
     settings.nightEndH = 7;
     settings.nightEndM = 0;
     settings.weekdayLanguageRu = true;
+    settings.uiLanguage = UI_LANG_RU;
     settings.timeCorrectionPerDay = 0;
-    settings.syncDays = 4;
-    settings.weatherEnabled = false;
-    settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
-    strcpy(settings.weatherApiUrl, defaultAccuWeatherUrl);
+    settings.syncDays = 1;
+    settings.weatherEnabled = true;
+    settings.weatherSource = WEATHER_SOURCE_OPEN_METEO;
+    settings.weatherLatitude = DEFAULT_WEATHER_LAT;
+    settings.weatherLongitude = DEFAULT_WEATHER_LON;
+    rebuildOpenMeteoUrlFromCoordinates();
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
     settings.autoOtaEnabled = true;
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
-    settings.activeWeekdaysMask = WEEKDAY_MASK_WORKDAYS;
+    settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
   }
 
-  // Валидация инициализации URL (на случай повреждения EEPROM/старой прошивки/обрезки)
-  settings.weatherApiUrl[199] = '\0';
-  size_t urlLen = strnlen(settings.weatherApiUrl, 200);
-  const char *expectedNeedle =
-    (settings.weatherSource == WEATHER_SOURCE_OPEN_METEO) ? "open-meteo.com/v1/forecast" : "/data/2.5/weather";
+  // Если координаты в EEPROM невалидны (старая версия), пробуем извлечь их из сохраненного URL.
+  if (!isValidLatitude(settings.weatherLatitude) || !isValidLongitude(settings.weatherLongitude)) {
+    float parsedLat = NAN;
+    float parsedLon = NAN;
+    bool latOk = parseFloatQueryParam(settings.weatherApiUrl, "latitude=", parsedLat);
+    bool lonOk = parseFloatQueryParam(settings.weatherApiUrl, "longitude=", parsedLon);
+    settings.weatherLatitude = (latOk && isValidLatitude(parsedLat)) ? parsedLat : DEFAULT_WEATHER_LAT;
+    settings.weatherLongitude = (lonOk && isValidLongitude(parsedLon)) ? parsedLon : DEFAULT_WEATHER_LON;
+  }
 
-  bool urlInvalid = (urlLen == 0 || urlLen >= 199 ||
+  // Валидация URL (на случай повреждения EEPROM/старой прошивки/обрезки)
+  settings.weatherApiUrl[WEATHER_API_URL_BUF_SIZE - 1] = '\0';
+  size_t urlLen = strnlen(settings.weatherApiUrl, WEATHER_API_URL_BUF_SIZE);
+  const char *expectedNeedle = "open-meteo.com/v1/forecast";
+
+  bool urlInvalid = (urlLen == 0 || urlLen >= (WEATHER_API_URL_BUF_SIZE - 1) ||
                      strncmp(settings.weatherApiUrl, "http", 4) != 0 ||
                      strstr(settings.weatherApiUrl, expectedNeedle) == nullptr);
 
-  if (urlInvalid) {
-    strcpy(settings.weatherApiUrl,
-           (settings.weatherSource == WEATHER_SOURCE_OPEN_METEO) ? defaultOpenMeteoUrl : defaultAccuWeatherUrl);
-  }
+  if (urlInvalid) rebuildOpenMeteoUrlFromCoordinates();
+
+  // URL всегда синхронизируем с координатами, чтобы запрос соответствовал настройкам геопозиции.
+  rebuildOpenMeteoUrlFromCoordinates();
 
   // Валидация weatherUpdateHours
   if (settings.weatherUpdateHours == 0 || settings.weatherUpdateHours > 24) {
@@ -422,314 +645,7 @@ void saveSettings() {
 }
 
 // ---------- веб-сервер функции ----------
-String getConfigPage() {
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>Celsius Clock - Setup</title>";
-  html += "<style>";
-  html += "body { font-family: Arial; margin: 20px; background: #1a1a1a; color: #fff; }";
-  html += ".container { max-width: 400px; margin: 0 auto; background: #2a2a2a; padding: 20px; border-radius: 10px; }";
-  html += "h1 { text-align: center; color: #4CAF50; }";
-  html += "input[type=text], input[type=password], input[type=number] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box; }";
-  html += "input[type=checkbox] { width: 20px; height: 20px; margin-right: 10px; }";
-  html += "button { width: 100%; padding: 12px; background: #4CAF50; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; }";
-  html += "button:hover { background: #45a049; }";
-  html += "label { display: block; margin-top: 10px; }";
-  html += ".checkbox-label { display: flex; align-items: center; margin: 10px 0; }";
-  html += ".time-group { display: flex; gap: 10px; }";
-  html += ".time-group input { width: 48%; }";
-  html += "h2 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; font-size: 18px; }";
-  html += "</style></head><body>";
-  html += "<div class='container'>";
-  html += "<h1>Celsius Clock Setup</h1>";
-  html += "<form method='POST' action='/save'>";
-
-  html += "<h2>WiFi Settings</h2>";
-  html += "<label>WiFi SSID:</label>";
-  html += "<input type='text' name='ssid' value='" + String(wifiSSID) + "' required>";
-  html += "<label>WiFi Password:</label>";
-  html += "<input type='password' name='password' value='" + String(wifiPassword) + "' required>";
-
-  html += "<h2>Display Settings</h2>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='showDebugCodes' " + String(settings.showDebugCodes ? "checked" : "") + "><label>Show debug codes</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='showDate' " + String(settings.showDate ? "checked" : "") + "><label>Show date</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='showWeekday' " + String(settings.showWeekday ? "checked" : "") + "><label>Show weekday</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='timeFormat24h' " + String(settings.timeFormat24h ? "checked" : "") + "><label>24-hour format</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBlink' " + String(settings.hourlyBlink ? "checked" : "") + "><label>Hourly LED blink</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='weekdayLanguageRu' " + String(settings.weekdayLanguageRu ? "checked" : "") + "><label>Weekday in Russian</label></div>";
-
-  html += "<h2>Night Mode</h2>";
-  html += "<label>Night start time:</label>";
-  html += "<div class='time-group'>";
-  html += "<input type='number' name='nightStartH' min='0' max='23' value='" + String(settings.nightStartH) + "' required>";
-  html += "<input type='number' name='nightStartM' min='0' max='59' value='" + String(settings.nightStartM) + "' required>";
-  html += "</div>";
-  html += "<label>Night end time:</label>";
-  html += "<div class='time-group'>";
-  html += "<input type='number' name='nightEndH' min='0' max='23' value='" + String(settings.nightEndH) + "' required>";
-  html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
-  html += "</div>";
-
-  html += "<h2>Work Days</h2>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdMon' " + String((settings.activeWeekdaysMask & (1U << 0)) ? "checked" : "") + "><label>Mon</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdTue' " + String((settings.activeWeekdaysMask & (1U << 1)) ? "checked" : "") + "><label>Tue</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdWed' " + String((settings.activeWeekdaysMask & (1U << 2)) ? "checked" : "") + "><label>Wed</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdThu' " + String((settings.activeWeekdaysMask & (1U << 3)) ? "checked" : "") + "><label>Th</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdFri' " + String((settings.activeWeekdaysMask & (1U << 4)) ? "checked" : "") + "><label>Fr</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdSat' " + String((settings.activeWeekdaysMask & (1U << 5)) ? "checked" : "") + "><label>Sat</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='wdSun' " + String((settings.activeWeekdaysMask & (1U << 6)) ? "checked" : "") + "><label>Su</label></div>";
-
-  html += "<h2>NTP Sync Settings</h2>";
-  html += "<label>Days between NTP syncs:</label>";
-  html += "<input type='number' name='syncDays' min='1' max='30' value='" + String(settings.syncDays) + "' required>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to sync time with NTP servers (1-30 days)</p>";
-
-  html += "<h2>Time Correction</h2>";
-  html += "<label>Time correction (seconds per day):</label>";
-  html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
-
-  html += "<h2>Weather Settings</h2>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' id='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " onchange='toggleWeatherSettings()'><label>Enable weather data</label></div>";
-  html += "<div id='weatherSettings' style='display: " + String(settings.weatherEnabled ? "block" : "none") + "'>";
-  html += "<label>Weather source:</label>";
-  html += "<select name='weatherSource' style='width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box;'>";
-  html += "<option value='openmeteo' " + String(settings.weatherSource == WEATHER_SOURCE_OPEN_METEO ? "selected" : "") + ">Open-Meteo</option>";
-  html += "<option value='accuweather' " + String(settings.weatherSource == WEATHER_SOURCE_ACCUWEATHER ? "selected" : "") + ">OpenWeather</option>";
-  html += "</select>";
-
-  html += "<label>Weather API URL:</label>";
-  // Экранируем & " ' для HTML, иначе длинный URL обрезается в атрибуте value
-  String weatherUrlEscaped = String(settings.weatherApiUrl);
-  weatherUrlEscaped.replace("&", "&amp;");
-  weatherUrlEscaped.replace("\"", "&quot;");
-  weatherUrlEscaped.replace("'", "&#39;");
-  html += "<input type='text' name='weatherApiUrl' value='" + weatherUrlEscaped + "' style='margin-bottom: 10px;'>";
-  html += "<label>Update interval (hours):</label>";
-  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
-  html += "<label>Weather screen timeout (sec):</label>";
-  html += "<input type='number' name='weatherScreenSeconds' min='1' max='60' value='" + String(settings.weatherScreenSeconds) + "' required style='margin-bottom: 10px;'>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather data (1-24 hours). Updates only when display is on.</p>";
-  html += "</div>";
-  html += "<script>";
-  html += "function toggleWeatherSettings() {";
-  html += "  var checkbox = document.getElementById('weatherEnabled');";
-  html += "  var settings = document.getElementById('weatherSettings');";
-  html += "  settings.style.display = checkbox.checked ? 'block' : 'none';";
-  html += "}";
-  html += "</script>";
-
-  html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
-  html += "</form>";
-  html += "<hr style='margin: 20px 0; border-color: #555;'>";
-  html += "<form method='POST' action='/reset' style='margin-top: 20px;'>";
-  html += "<button type='submit' style='background: #f44336;'>Reset Settings</button>";
-  html += "</form>";
-  html += "</div></body></html>";
-  return html;
-}
-
-void handleRoot() {
-  server.send(200, "text/html", getConfigPage());
-}
-
-void handleReset() {
-  clearWiFiConfig();
-  logToDisplay(CODE_CONFIG_RESET);
-
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>Settings reset</title>";
-  html += "<style>body { font-family: Arial; text-align: center; margin-top: 50px; background: #1a1a1a; color: #fff; }";
-  html += ".message { background: #2a2a2a; padding: 20px; border-radius: 10px; max-width: 400px; margin: 0 auto; }";
-  html += "h1 { color: #f44336; }</style></head><body>";
-  html += "<div class='message'><h1>Settings Reset!</h1>";
-  html += "<p>Resetting...</p></div></body></html>";
-  server.send(200, "text/html", html);
-
-  delay(2000);
-  ESP.restart();
-}
-
-void handleSave() {
-  if (server.hasArg("ssid") && server.hasArg("password")) {
-    String ssid = server.arg("ssid");
-    String password = server.arg("password");
-
-    // Обрезаем пробелы
-    ssid.trim();
-    password.trim();
-
-    if (ssid.length() == 0 || ssid.length() >= 64 || password.length() >= 64) {
-      server.send(400, "text/plain", "Error: Invalid SSID or password length");
-      return;
-    }
-
-    ssid.toCharArray(wifiSSID, 64);
-    password.toCharArray(wifiPassword, 64);
-
-    // Убеждаемся, что строки заканчиваются нулем
-    wifiSSID[63] = '\0';
-    wifiPassword[63] = '\0';
-
-    // Обработка настроек устройства
-    settings.showDebugCodes = server.hasArg("showDebugCodes");
-    settings.showDate = server.hasArg("showDate");
-    settings.showWeekday = server.hasArg("showWeekday");
-    settings.timeFormat24h = server.hasArg("timeFormat24h");
-    settings.hourlyBlink = server.hasArg("hourlyBlink");
-    settings.weekdayLanguageRu = server.hasArg("weekdayLanguageRu");
-
-    if (server.hasArg("nightStartH")) {
-      int h = server.arg("nightStartH").toInt();
-      int m = server.arg("nightStartM").toInt();
-      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
-        settings.nightStartH = h;
-        settings.nightStartM = m;
-      }
-    }
-
-    if (server.hasArg("nightEndH")) {
-      int h = server.arg("nightEndH").toInt();
-      int m = server.arg("nightEndM").toInt();
-      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
-        settings.nightEndH = h;
-        settings.nightEndM = m;
-      }
-    }
-
-    if (server.hasArg("timeCorrectionPerDay")) {
-      int32_t correction = server.arg("timeCorrectionPerDay").toInt();
-      // Ограничиваем разумными пределами: от -3600 до +3600 секунд в сутки
-      if (correction >= -3600 && correction <= 3600) {
-        settings.timeCorrectionPerDay = correction;
-      }
-    }
-
-    if (server.hasArg("syncDays")) {
-      int days = server.arg("syncDays").toInt();
-      // Ограничиваем разумными пределами: от 1 до 30 суток
-      if (days >= 1 && days <= 30) {
-        settings.syncDays = days;
-      }
-    }
-
-    uint8_t weekdaysMask = 0;
-    if (server.hasArg("wdMon")) weekdaysMask |= (1U << 0);
-    if (server.hasArg("wdTue")) weekdaysMask |= (1U << 1);
-    if (server.hasArg("wdWed")) weekdaysMask |= (1U << 2);
-    if (server.hasArg("wdThu")) weekdaysMask |= (1U << 3);
-    if (server.hasArg("wdFri")) weekdaysMask |= (1U << 4);
-    if (server.hasArg("wdSat")) weekdaysMask |= (1U << 5);
-    if (server.hasArg("wdSun")) weekdaysMask |= (1U << 6);
-    settings.activeWeekdaysMask = weekdaysMask & WEEKDAY_MASK_ALL;
-
-    // Обработка настроек погоды
-    settings.weatherEnabled = server.hasArg("weatherEnabled");
-
-    if (server.hasArg("weatherSource")) {
-      String src = server.arg("weatherSource");
-      src.trim();
-      if (src == "openmeteo" || src == "narodmon") {
-        settings.weatherSource = WEATHER_SOURCE_OPEN_METEO;
-      } else if (src == "accuweather") {
-        settings.weatherSource = WEATHER_SOURCE_ACCUWEATHER;
-      }
-    }
-
-    if (server.hasArg("weatherApiUrl")) {
-      String url = server.arg("weatherApiUrl");
-      url.trim();
-      if (url.length() > 0 && url.length() < 200) {
-        url.toCharArray(settings.weatherApiUrl, 200);
-      }
-    }
-
-    if (server.hasArg("weatherUpdateHours")) {
-      int hours = server.arg("weatherUpdateHours").toInt();
-      // Ограничиваем разумными пределами: от 1 до 24 часов
-      if (hours >= 1 && hours <= 24) {
-        settings.weatherUpdateHours = hours;
-      }
-    }
-    if (server.hasArg("weatherScreenSeconds")) {
-      int sec = server.arg("weatherScreenSeconds").toInt();
-      if (sec >= 1 && sec <= 60) {
-        settings.weatherScreenSeconds = sec;
-      }
-    }
-
-    saveWiFiConfig(wifiSSID, wifiPassword);
-    saveSettings();
-
-    // Проверяем, что настройки сохранились
-    loadWiFiConfig();
-
-    if (strlen(wifiSSID) == 0 || strcmp(wifiSSID, ssid.c_str()) != 0) {
-      char detail[32];
-      snprintf(detail, sizeof(detail), "len=%d", strlen(wifiSSID));
-      logToDisplay(CODE_WIFI_CONFIG_ERR, detail);
-      server.send(500, "text/plain", "Error: Failed to save settings");
-      delay(2000);
-      return;
-    }
-
-    logToDisplay(CODE_CONFIG_SAVED);
-
-    String html = "<!DOCTYPE html><html><head>";
-    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    html += "<title>Settings saved</title>";
-    html += "<style>body { font-family: Arial; text-align: center; margin-top: 50px; background: #1a1a1a; color: #fff; }";
-    html += ".message { background: #2a2a2a; padding: 20px; border-radius: 10px; max-width: 400px; margin: 0 auto; }";
-    html += "h1 { color: #4CAF50; }</style></head><body>";
-    html += "<div class='message'><h1>Saved!</h1>";
-    html += "<p>Resetting...</p></div></body></html>";
-    server.send(200, "text/html", html);
-
-    // Увеличиваем задержку перед перезагрузкой, чтобы EEPROM.commit() точно завершился
-    delay(2000);
-    ESP.restart();
-  } else {
-    server.send(400, "text/plain", "Error: SSID or password missed");
-  }
-}
-
-void updateConfigModeDisplay() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("Setup mode");
-  display.setCursor(0, 32);
-  display.print("SSID: ");
-  display.println(AP_SSID);
-  display.setCursor(0, 64);
-  display.print("IP: ");
-  display.println(WiFi.softAPIP());
-  display.display();
-}
-
-void startConfigMode() {
-  logToDisplay(CODE_CONFIG_MODE);
-  configMode = true;
-  setCpuMaxPerformance();
-
-  char detail[32];
-  snprintf(detail, sizeof(detail), "%d MHz", getCpuFrequencyMhz());
-  logToDisplay(CODE_CPU_FREQ, detail);
-
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-  snprintf(detail, sizeof(detail), "%s", WiFi.softAPIP().toString().c_str());
-  logToDisplay(CODE_CONFIG_AP_START, detail);
-
-  server.on("/", handleRoot);
-  server.on("/save", HTTP_POST, handleSave);
-  server.on("/reset", HTTP_POST, handleReset);
-  server.begin();
-
-  updateConfigModeDisplay();
-}
+#include "WebConfigServer.h"
 
 void setCpuLowPower() {
   setCpuFrequencyMhz(40);
@@ -751,115 +667,45 @@ void setDisplayState(bool on) {
   displayOn = on;
 }
 
-bool readSHT31SingleShot(float &t, float &h) {
-  Wire.beginTransmission(SHT31_ADDR);
-  Wire.write(0x24);
-  Wire.write(0x00);
-  if (Wire.endTransmission() != 0) {
+bool readIndoorSensors(float &t, float &h) {
+  if (!sensorOK) {
     return false;
   }
-  delay(15);
-  if (Wire.requestFrom(SHT31_ADDR, (uint8_t)6) != 6) {
+  float tRead = sht31.readTemperature();
+  float hRead = sht31.readHumidity();
+  if (isnan(tRead) || isnan(hRead)) {
     return false;
   }
-  uint8_t data[6];
-  for (uint8_t i = 0; i < 6; ++i) {
-    data[i] = Wire.read();
-  }
-  uint16_t rawT = ((uint16_t)data[0] << 8) | data[1];
-  uint16_t rawH = ((uint16_t)data[3] << 8) | data[4];
-  t = -45.0f + 175.0f * (float)rawT / 65535.0f;
-  h = 100.0f * (float)rawH / 65535.0f;
+  t = tRead;
+  h = hRead;
   return true;
 }
 
-void sht31SoftReset() {
-  Wire.beginTransmission(SHT31_ADDR);
-  Wire.write(0x30);
-  Wire.write(0xA2);
-  Wire.endTransmission();
-  delay(2);
-}
-
-const uint8_t font5x8[][8] = {
-  { 0b11111,
-    0b10001,
-    0b10001,
-    0b10001,
-    0b10001,
-    0b10001,
-    0b10001,
-    0b00000 },  // П
-  {
-    0b10001,
-    0b10001,
-    0b10001,
-    0b01111,
-    0b00001,
-    0b00001,
-    0b00001,
-    0b00000 },  // Ч
-  {
-    0b11111,
-    0b10000,
-    0b10000,
-    0b11110,
-    0b10001,
-    0b10001,
-    0b11110,
-    0b00000 }  // Б
-};
-
 void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
   wday = wday % 7;
+  display.setCursor(x + 4, y);
 
+  const char *days[7];
   if (settings.weekdayLanguageRu) {
-    // Русский язык
-    switch (wday) {
-      case 1:                                                       // ПН
-        display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
-        display.setCursor(x + 10, y);
-        display.print("H");
-        break;
-      case 2:  // ВТ
-        display.setCursor(x + 4, y);
-        display.print("BT");
-        break;
-      case 3:  // CP
-        display.setCursor(x + 4, y);
-        display.print("CP");
-        break;
-      case 4:  // ЧТ
-        display.drawBitmap(x, y, font5x8[1], 8, 8, SSD1306_WHITE);
-        display.setCursor(x + 10, y);
-        display.print("T");
-        break;
-      case 5:                                                       // ПТ
-        display.drawBitmap(x, y, font5x8[0], 8, 8, SSD1306_WHITE);  // П
-        display.setCursor(x + 10, y);
-        display.print("T");
-        break;
-      case 6:  // СБ
-        display.setCursor(x + 4, y);
-        display.print("C");
-        display.drawBitmap(x + 8, y, font5x8[2], 8, 8, SSD1306_WHITE);  // Б
-        break;
-      case 0:  // ВС
-        display.setCursor(x + 4, y);
-        display.print("BC");
-        break;
-    }
+    static const char *ruDays[] = { "ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ" };
+    memcpy(days, ruDays, sizeof(days));
   } else {
-    // Английский язык
-    const char *days[] = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
-    display.setCursor(x + 4, y);
-    display.print(days[wday]);
+    static const char *enDays[] = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
+    memcpy(days, enDays, sizeof(days));
   }
+  display.print(days[wday]);
 }
 
 void setBrightness(uint8_t br) {
   display.ssd1306_command(0x81);
   display.ssd1306_command(br);
+}
+
+static void drawDegreeMark(int16_t x, int16_t y) {
+  display.fillRect(x + 1, y, 1, 1, SSD1306_WHITE);
+  display.fillRect(x, y + 1, 1, 1, SSD1306_WHITE);
+  display.fillRect(x + 2, y + 1, 1, 1, SSD1306_WHITE);
+  display.fillRect(x + 1, y + 2, 1, 1, SSD1306_WHITE);
 }
 
 float readBattery() {
@@ -970,22 +816,25 @@ void drawBattery(uint8_t bars) {
 
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.clearDisplay();
-  drawBattery(batBars); // заряд батареи
+  display.setTextSize(1);
 
-  int yPos = 7;
-
-  if (settings.showDate || settings.showWeekday) { // дата и день недели в одну строку
-    display.setTextSize(1);
-    if (settings.showDate) {
-      display.setCursor(0, yPos);
-      display.printf("%02d.%02d", d, mo);
-    }
-    if (settings.showWeekday) {
-      // день недели сразу после даты (DD.MM ~30 px, отступ 6 px)
-      drawDayShort(wday, 38, yPos);
-    }
-    yPos += 12;
+  const int16_t topY = 0;
+  // 1) День недели — левый верхний угол
+  if (settings.showWeekday) {
+    drawDayShort(wday, 0, topY);
   }
+  // 2) Дата (число.месяц) — по центру верхней строки (шрифт 1: ~6 px на символ)
+  if (settings.showDate) {
+    char dateBuf[8];
+    snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d", d, mo);
+    const int16_t charW = 6;
+    const int16_t textW = charW * (int16_t)strlen(dateBuf);
+    const int16_t dateX = ((int16_t)display.width() - textW) / 2;
+    display.setCursor(dateX, topY);
+    display.print(dateBuf);
+  }
+  // 3) Индикатор заряда — вверху справа (как раньше)
+  drawBattery(batBars);
 
   //display.drawLine(0, 20, 128, 20, SSD1306_WHITE); // разделительная линия
 
@@ -997,34 +846,66 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   }
 
   display.setTextSize(4);
-  display.setCursor(4, 22);
-  display.printf("%02d:%02d", displayH, m);
+
+  // Подготовим строку времени для расчета ширины
+  char lBuf[3], rBuf[3];
+  snprintf(lBuf, sizeof(lBuf), "%02d", displayH);
+  snprintf(rBuf, sizeof(rBuf), "%02d", m);
+
+  // Ширина символа шрифта размером 4: 6*4=24px
+  int charW = 6 * 4; // 24 px
+  int colonSpace = 16; // место между часами и минутами, чтобы хватило для квадратиков
+  int lLen = strlen(lBuf);
+  int rLen = strlen(rBuf);
+  int fullW = (lLen + rLen) * charW + colonSpace;
+
+  int screenW = (int)display.width();
+  int startX = (screenW - fullW) / 2;
+  int y = 20;
+
+  // Нарисовать часы
+  display.setCursor(startX, y);
+  display.print(lBuf);
+
+  // Нарисовать "двоеточие" из двух квадратов 3x3px с разносом 8px
+  int colonX = startX + lLen * charW + (colonSpace - 3) / 2;
+  int colonYtop = y + 6;          // немного ниже верхнего края цифр
+  int colonYbot = colonYtop + 3 + 8; // нижний квадрат с промежутком 8px
+
+  display.fillRect(colonX, colonYtop, 3, 3, SSD1306_WHITE);
+  display.fillRect(colonX, colonYbot, 3, 3, SSD1306_WHITE);
+
+  // Нарисовать минуты
+  int minX = startX + lLen * charW + colonSpace;
+  display.setCursor(minX, y);
+  display.print(rBuf);
 
   //display.drawLine(0, 48, 128, 48, SSD1306_WHITE);
 
   display.setTextSize(1);
   // Наружная температура (если включена и доступна)
-  if (settings.weatherEnabled && !isnan(outdoorTemperature)) {
+  if (!isnan(outdoorTemperature)) {
+    int16_t outX = 12;
     if (outdoorTemperature > 0) {
-      display.setCursor(12, 56);
+      outX = 12;
     } else {
-      display.setCursor(9, 56);  // оставляем место для минуса
+      outX = 9;  // оставляем место для минуса
     }
-    display.print((int)outdoorTemperature);
-    display.print((char)247);
-    if (outdoorTemperature > 0) {
-      display.print("C");
-    }
+    char outBuf[8];
+    snprintf(outBuf, sizeof(outBuf), "%d", (int)outdoorTemperature);
+    display.setCursor(outX, 56);
+    display.print(outBuf);
+    drawDegreeMark(outX + (int16_t)strlen(outBuf) * 6 + 1, 55);
   }
   display.setCursor(52, 56);
-  display.print((int)tempC);  // температура внутри
-  display.print((char)247);
-  display.print("C");
-  display.setCursor(100, 56);
+  char inBuf[8];
+  snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
+  display.print(inBuf);  // температура внутри
+  drawDegreeMark(52 + (int16_t)strlen(inBuf) * 6 + 1, 55);
+  display.setCursor(78, 56);
   display.printf("%d%%", (int)hum);  // влажность
   display.display();
-  memcpy(displayBackup, display.getBuffer(), OLED_BUFFER_SIZE);
-  displayBackupValid = true;
+  displayBackupValid = false;
 }
 
 bool ntpSync() {
@@ -1034,8 +915,8 @@ bool ntpSync() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  WiFi.begin(wifiSSID, wifiPassword);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.begin(wifiSSID, wifiPassword, 15);
 
   unsigned long startAttempt = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
@@ -1079,6 +960,37 @@ bool ntpSync() {
   return ok;
 }
 
+// NTP sync, когда WiFi уже подключен (используется в погодном цикле)
+static bool ntpSyncOverConnectedWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  logToDisplay(CODE_NTP_SYNC, nullptr, 0);
+  timeClient.begin();
+  timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
+  bool ok = timeClient.forceUpdate();
+  if (ok) {
+    time_t ntpEpoch = timeClient.getEpochTime();
+    time_t localRawEpoch = storedEpoch;
+    if (lastSyncEpoch > 0 && lastSyncLocalEpoch > 0 && localRawEpoch > lastSyncLocalEpoch) {
+      time_t ntpElapsed = ntpEpoch - lastSyncEpoch;
+      time_t localElapsed = localRawEpoch - lastSyncLocalEpoch;
+      if (ntpElapsed > 3600) {
+        int64_t driftMs = ((int64_t)(ntpElapsed - localElapsed) * 1000000LL) / (int64_t)ntpElapsed;
+        driftCorrectionMs = (int32_t)driftMs;
+      }
+    }
+    lastSyncEpoch = ntpEpoch;
+    lastSyncLocalEpoch = ntpEpoch;
+    storedEpoch = ntpEpoch;
+    logToDisplay(CODE_NTP_OK);
+  } else {
+    logToDisplay(CODE_NTP_ERROR);
+    ntpServerIndex = (ntpServerIndex + 1) % ntpServerCount;
+  }
+  return ok;
+}
+
 uint32_t runCycle() {
   uint32_t cycleStartMs = millis();
   time_t local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
@@ -1089,15 +1001,7 @@ uint32_t runCycle() {
     localtime_r(&local, &ti);
   }
 
-  bool needSync = !timeValid;
-  if (timeValid && lastSyncLocalEpoch > 0) {
-    uint32_t syncPeriodSec = (uint32_t)settings.syncDays * 24UL * 3600UL;
-    if ((storedEpoch - lastSyncLocalEpoch) >= syncPeriodSec) {
-      needSync = true;
-    }
-  }
-
-  if (needSync) {
+  if (!timeValid) {
     if (!timeValid) {
       logToDisplay(CODE_FIRST_SYNC);
     }
@@ -1114,12 +1018,10 @@ uint32_t runCycle() {
   if (sensorOK) {
     float t = tempC;
     float h = hum;
-    if (readSHT31SingleShot(t, h) && !isnan(t) && !isnan(h)) {
+    if (readIndoorSensors(t, h)) {
       tempC = t;
       hum = h;
     }
-    sht31.heater(false);
-    sht31SoftReset();
   }
 
   float vBat = storedVBat;
@@ -1163,7 +1065,7 @@ uint32_t runCycle() {
   bool workdayEnabled = timeValid ? isWeekdayEnabled(ti.tm_wday) : true;
 
   // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
-  if (settings.weatherEnabled && timeValid && workdayEnabled && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+  if (timeValid && workdayEnabled && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
 
@@ -1178,7 +1080,7 @@ uint32_t runCycle() {
       WiFi.persistent(false);
       WiFi.mode(WIFI_STA);
       WiFi.setSleep(false);
-      WiFi.begin(wifiSSID, wifiPassword);
+      WiFi.begin(wifiSSID, wifiPassword, 15);
 
       unsigned long startAttempt = millis();
       while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 15000UL) {
@@ -1204,7 +1106,7 @@ uint32_t runCycle() {
         localtime_r(&local, &ti);
       }
       tryAutoOtaUpdate(local, timeValid, night, workdayEnabled);
-      bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
+      bool success = fetchOutdoorTemperature(settings.weatherApiUrl, WEATHER_SOURCE_OPEN_METEO);
       if (success) {
         lastWeatherUpdate = local;  // та же шкала, что в shouldUpdateWeather() (не time(nullptr) — libc не синхронизирован с storedEpoch)
         snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
@@ -1236,15 +1138,56 @@ uint32_t runCycle() {
     // Показываем детали погоды либо после wakeup по кнопке,
     // либо если кнопку (GPIO4) держат замкнутой прямо сейчас.
     bool weatherButtonPressedNow = isWeatherButtonPressed();
-    if ((wokeByWeatherButton || weatherButtonPressedNow) && settings.weatherEnabled) {
-      drawWeatherInfoScreen(display,
-                            outdoorTemperature,
-                            weatherFeelsLikeC,
-                            weatherPressureHpa,
-                            weatherHumidityPct,
-                            weatherWindSpeedMs,
-                            settings.weatherSource);
-      delay((uint32_t)settings.weatherScreenSeconds * 1000UL);
+    if (wokeByWeatherButton || wokeByMotionSensor || weatherButtonPressedNow) {
+      uint32_t detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
+      uint8_t detailPage = 0;
+      bool prevBtnLow = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
+      drawWeatherDetailScreen(display,
+                              detailPage,
+                              outdoorTemperature,
+                              weatherFeelsLikeC,
+                              weatherPressureHpa,
+                              weatherHumidityPct,
+                              weatherWindSpeedMs,
+                              weatherWindDirectionDeg,
+                              weatherWmoCode,
+                              weatherPrecipProbabilityPct,
+                              weatherDailyWmoCode,
+                              weatherDailyTempMaxC,
+                              weatherDailyTempMinC,
+                              weatherDailyWindDayMs,
+                              weatherDailyPrecipDayPct,
+                              (uint8_t)ti.tm_wday,
+                              weatherNearestNightMinC,
+                              weatherNearestNightWmoCode);
+      while ((int32_t)(millis() - detailEndMs) < 0) {
+        bool low = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
+        if (low && !prevBtnLow) {
+          detailPage = (detailPage + 1) % kWeatherDetailScreenCount;
+          detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
+          drawWeatherDetailScreen(display,
+                                  detailPage,
+                                  outdoorTemperature,
+                                  weatherFeelsLikeC,
+                                  weatherPressureHpa,
+                                  weatherHumidityPct,
+                                  weatherWindSpeedMs,
+                                  weatherWindDirectionDeg,
+                                  weatherWmoCode,
+                                  weatherPrecipProbabilityPct,
+                                  weatherDailyWmoCode,
+                                  weatherDailyTempMaxC,
+                                  weatherDailyTempMinC,
+                                  weatherDailyWindDayMs,
+                                  weatherDailyPrecipDayPct,
+                                  (uint8_t)ti.tm_wday,
+                                  weatherNearestNightMinC,
+                                  weatherNearestNightWmoCode);
+          delay(45);
+        }
+        prevBtnLow = low;
+        delay(12);
+      }
     }
 
     drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
@@ -1296,11 +1239,17 @@ void enterDeepSleep(uint32_t sleepSeconds) {
   if (sleepSeconds == 0) {
     sleepSeconds = 60;
   }
-  // Разрешаем пробуждение замыканием WEATHER_BUTTON_PIN (GPIO4) на GND (LOW).
+  // Разрешаем пробуждение:
+  // - GPIO4 (кнопка) по LOW
+  // - GPIO5 (BMI160 INT1) по HIGH
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
+  pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
+  gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
+  gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
   esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
+  esp_deep_sleep_enable_gpio_wakeup((1ULL << BMI160_INT1_PIN), ESP_GPIO_WAKEUP_GPIO_HIGH);
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
 }
@@ -1309,9 +1258,11 @@ void setup() {
   Serial.begin(9600);
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   wokeByWeatherButton = false;
+  wokeByMotionSensor = false;
   if (wakeCause == ESP_SLEEP_WAKEUP_GPIO) {
     uint64_t wakeMask = esp_sleep_get_gpio_wakeup_status();
     wokeByWeatherButton = (wakeMask & (1ULL << WEATHER_BUTTON_PIN)) != 0;
+    wokeByMotionSensor = (wakeMask & (1ULL << BMI160_INT1_PIN)) != 0;
   }
 
   // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
@@ -1324,15 +1275,17 @@ void setup() {
   // Проверка сброса настроек: если LED_PIN (GPIO 0) замкнут на землю при старте
   // Кратковременно переключаем на вход для проверки
   pinMode(LED_PIN, INPUT_PULLUP);
+  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
   delayMicroseconds(100);  // Минимальная задержка для стабилизации
   bool resetRequested = (digitalRead(LED_PIN) == LOW);
+  bool setupModeRequested = (digitalRead(SETUP_BUTTON_PIN) == LOW);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
   if (resetRequested) {
     // GPIO был замкнут на землю - сбрасываем настройки
     clearWiFiConfig();
-    logToDisplay(CODE_CONFIG_RESET, "GPIO reset");
+    Serial.println("Config reset by GPIO0 at boot");
     delay(2000);
   }
 
@@ -1354,25 +1307,36 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   display.clearDisplay();
   setBrightness(0x01);
-  if (displayBackupValid) {
-    memcpy(display.getBuffer(), displayBackup, OLED_BUFFER_SIZE);
-    display.display();
-  } else {
-    display.display();
-  }
+  display.display();
 
   sensorOK = sht31.begin(SHT31_ADDR);
   logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
+  Serial.printf("SHT31=%d\n", (int)sensorOK);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
+  pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
+  gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
+  gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
   Serial.printf("Weather button GPIO%d state=%d\n", WEATHER_BUTTON_PIN, digitalRead(WEATHER_BUTTON_PIN));
+  bool bmi160OK = initBMI160MotionWake();
+  logToDisplay(bmi160OK ? CODE_BMI160_OK : CODE_BMI160_ERR);
+  Serial.printf("BMI160 INT1 GPIO%d state=%d, wakeByMotion=%d\n",
+                BMI160_INT1_PIN,
+                digitalRead(BMI160_INT1_PIN),
+                (int)wokeByMotionSensor);
 
   // Загрузка настроек устройства
   loadSettings();
+
+  if (setupModeRequested) {
+    logToDisplay(CODE_CONFIG_MODE, "GPIO1 forced");
+    startConfigMode();
+    return;
+  }
 
   // Проверка настроек WiFi
   if (!hasWiFiConfig()) {
@@ -1388,9 +1352,19 @@ void setup() {
   snprintf(detail, sizeof(detail), "%s", wifiSSID);
   logToDisplay(CODE_WIFI_CONFIG_OK, detail);
 
-  // Настройки есть - продолжаем в обычном режиме
-  // WiFi подключение будет происходить при необходимости (синхронизация NTP)
-  // Не переходим в режим настройки, даже если WiFi временно недоступен
+  // Если время ещё невалидно, пробуем первичную синхронизацию.
+  // При неудаче сразу переходим в setup mode, чтобы пользователь мог
+  // переподключить устройство к актуальной WiFi сети.
+  if (!hasValidTime(storedEpoch)) {
+    if (!ntpSync()) {
+      logToDisplay(CODE_WIFI_FAIL, "open setup");
+      startConfigMode();
+      return;
+    }
+  }
+
+  // Настройки есть - продолжаем в обычном режиме.
+  // Дальнейшее WiFi подключение будет происходить при необходимости.
 
   // Обычный режим работы
   uint32_t sleepSeconds = runCycle();
