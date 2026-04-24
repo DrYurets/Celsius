@@ -1,247 +1,157 @@
-# DIY Stellar Clock - Celsius Version
+# Celsius Clock (ESP32-C3)
 
-A minimalist ESP32-C3 clock that shows time, date, temperature, humidity, and battery status on an OLED. The device keeps time via WiFi/NTP, runs in deep sleep between updates, and switches off the screen automatically during night hours to save power.
+Battery-powered ESP32-C3 clock with OLED, deep sleep, WiFi/NTP sync, outdoor weather, OTA update, and modular indoor sensor selection from web admin.
 
 ![DIY Stellar Clock](outer_view.jpg)
 
-## Branches / Display variants
+## Branches
 
-- **main**, **correction** — SSD1306 **128×32**; в скетче `setRotation(1)` — «высокий» логический кадр. Та же **подробная погода по GPIO4**, что и здесь: пробуждение замыканием на GND, данные только из **RTC** после последнего успешного запроса (`WeatherAPI.h`). Вёрстка детального экрана в **`WeatherDisplay.h`**: узкая колонка или более широкий блок в зависимости от `display.width()`.
-- **128x64** (ветка этого README) — SSD1306 **128×64** в **альбомной** ориентации. Тот же **GPIO4**, те же поля в RTC, но **двухколоночная** разметка детальной погоды под высоту 64 px в `WeatherDisplay.h`.
+- `128x64` - SSD1306 128x64 (landscape), this README matches this branch.
+- `main` / `correction` - SSD1306 128x32 variants.
 
-  **Дополнительно в ветке 128x64 (по сравнению с main):**
-  - **Индикатор заряда** — иконка батарейки с заливкой уровня; **правый верхний** угол (`display.width()`).
-  - **Дата и день недели в одну строку** — например `26.01  ПН`.
-  - Разметка часов и `SCREEN_WIDTH` / `SCREEN_HEIGHT` под 128×64 landscape.
+## Current Core Features
 
-## Detailed weather screen (GPIO4) — main & 128x64
+- Deep sleep cycle with minute-aligned wakeups.
+- RTC-backed time base (`storedEpoch`) with:
+  - NTP sync over multiple fallback servers,
+  - automatic drift compensation,
+  - manual correction (`seconds/day`).
+- User-configurable timezone in web admin (`UTC offset` select).  
+  NTP now applies `settings.timezoneMinutes` at sync time.
+- Outdoor weather from Open-Meteo:
+  - update interval 1..24h,
+  - WiFi on-demand only,
+  - weather cache in RTC.
+- 5-page detailed weather screen by GPIO4 button (cached data only; no extra HTTP on button press).
+- Web setup mode (AP + admin page) with full device configuration.
+- OTA from setup page with safety prechecks.
+- AutoOTA check/update support (configurable, optional).
+- JSON export/import of settings from admin page (safe mode: no WiFi credentials in JSON).
 
-Одинаковая логика на обеих ветках (если в веб-интерфейсе включена погода):
+## Indoor Sensor Architecture
 
-| Topic | Details |
-|--------|---------|
-| **Hardware** | **GPIO4** to **GND** (internal pull-up). Short pulse wakes the ESP32-C3 from deep sleep (GPIO wakeup + timer). You can hold LOW during the wake cycle so the detail screen is shown. |
-| **No extra HTTP** | The detail view reads **RTC-backed** values from the last successful weather fetch only. It does **not** turn on WiFi or call the API again for GPIO4 alone. |
-| **Web UI** | **Weather screen timeout** / **Weather detail screen (seconds)** — 1–60 s (default 10); EEPROM field `weatherScreenSeconds`. |
-| **Open-Meteo** | `current.temperature_2m` plus optional `apparent_temperature`, `relative_humidity_2m`, `surface_pressure`, `wind_speed_10m` (use `wind_speed_unit=ms` in URL). See [Open-Meteo docs](https://open-meteo.com/en/docs). |
-| **Poll interval** | `lastWeatherUpdate` uses the same time base as the clock (`local` / `storedEpoch`), not libc `time()`. |
-| **Source files** | `WeatherDisplay.h` (layout differs by branch), `WeatherAPI.h`, `Celsius.ino` (`WEATHER_BUTTON_PIN`, GPIO deep sleep wakeup, `drawWeatherInfoScreen`). |
+Sensor logic is modular and stored under `sensors/`:
 
-**This branch (128x64):** detail screen — two columns (T / FL / H left, W / P right), source is **Open-Meteo**. **Branch main:** compact layout for the rotated 128×32 module — see README on `main`.
+- `sensors/SensorTypes.h`
+- `sensors/SensorManager.h`
+- `sensors/sht31/SHT31Sensor.h`
+- `sensors/aht20bmp280/AHT20BMP280Sensor.h`
+- `sensors/aht21/AHT21Sensor.h`
+- `sensors/htu21/HTU21Sensor.h`
+- `sensors/bmi160/BMI160Motion.h`
 
-## Inspiration
+### Supported runtime combinations
 
-This project is inspired by the [DIY Stellar Clock](https://sites.google.com/view/huy-materials-used/diy-stellar-clock) by Huy Vector DIY.
+- Temperature/Humidity source (single choice, radio in admin UI; no "main" sensor hardcoded):
+  - `SHT31`
+  - `AHT20 + BMP280`
+  - `AHT21`
+  - `HTU21`
+- Motion wake source:
+  - `BMI160` enable/disable (checkbox in admin UI).
 
-## Hardware Components
+## Web Admin (Setup Mode)
 
-- **ESP32-C3** - Main microcontroller
-- **OLED Display** - SSD1306, 128×32 or 128×64 pixels (см. ветку **128x64** для альбомной ориентации 128×64)
-- **AHT20** — температура и влажность (I²C, обычно `0x38`)
-- **BMP280** — атмосферное давление (I²C, `0x76` или `0x77` в зависимости от модуля)
-- **LED** - Status indicator (blinks at the start of each hour)
-- **Type-C Charging Module** - Power management
-- **Battery** - 18350B or similar 3.7V lithium battery
-- **Resistors** - Two 100 kΩ resistors for voltage divider (battery monitoring on GPIO 3)
-- **Switch** - Power control
-- **Optional: weather button** - momentary switch (or wire to GND): **GPIO4** (`WEATHER_BUTTON_PIN`) with internal pull-up — wake from deep sleep + detailed weather screen
-- **Optional: BMI160** - accelerometer/gyro on I2C (`SDA/SCL`) + `INT1` to **GPIO5** — wake from deep sleep by movement/flip and show detailed weather screen
-- **Copper Wire** - Connections
+Device enters setup mode when WiFi config is missing, invalid, or initial setup is needed.
 
-## Software Requirements
+### AP defaults
 
-### Required Libraries
+- SSID: `CelsiusClock`
+- Password: `12345678`
+- URL: `http://192.168.4.1`
 
-- **ESP32 Arduino Core** - Core support for ESP32-C3
-- **GyverOLED** - OLED driver (SSD1306 128x64) with Cyrillic-friendly rendering
-- **Adafruit AHTX0** — драйвер AHT10/AHT20
-- **Adafruit BMP280** — драйвер BMP280 (часто тянет **Adafruit Unified Sensor**)
-- **NTPClient** - Network Time Protocol client for time synchronization
-- **ArduinoJson** - JSON parsing for weather API responses
-- **(Optional) BMI160 Sensor Library** - e.g. **DFRobot_BMI160** (for easier sensor diagnostics; wake logic in current sketch is configured via BMI160 registers over I2C)
+### Admin sections
 
-### Built-in Libraries Used
+- WiFi settings
+- Display settings
+- Device configuration (sensor gallery + sensor selection)
+- Night mode
+- Work days
+- NTP/time correction + timezone select
+- Weather settings
+- Auto OTA
+- Settings backup (export/import JSON)
+- Firmware OTA upload
+- Reset settings
 
-- `WiFi.h` - WiFi connectivity
-- `Wire.h` - I2C communication
-- `WiFiUdp.h` - UDP communication for NTP
-- `time.h` - Time functions
-- `WebServer.h` - HTTP server for WiFi and device configuration
-- `EEPROM.h` - Non-volatile storage for WiFi credentials and device settings
+## Settings JSON Backup/Restore
 
-## Features
+### Endpoints
 
-- **Time & Date** – Hours/minutes with customizable display options (12/24-hour format, date, weekday)
-- **Environment** – Indoor temperature / humidity from **AHT20**, pressure from **BMP280**; outdoor weather from **Open-Meteo** (URL generated from configured latitude/longitude)
-- **Battery Indicator** – 5-bar level based on ADC reading (updated every 15 min by default)
-- **WiFi Time Sync** – Sequential fallback across multiple NTP servers; retries until time becomes valid; configurable sync period (1-30 days via web interface)
-- **Drift Correction** – Automatic time drift compensation between NTP syncs (calculated after second sync)
-- **Manual Time Correction** – User-configurable time correction to compensate for quartz crystal inaccuracy (adjustable in seconds per day via web interface)
-- **Web Configuration Interface** – Complete web-based setup for WiFi and all device settings via access point mode; no code modification needed
-- **Safe OTA Update (Web UI)** – Firmware upload (`.bin`) directly from setup page with prechecks (battery threshold + OTA partition + password confirmation)
-- **Customizable Display** – Toggle date, weekday, time format (12/24h), debug codes, and weekday language (English/Russian)
-- **Configurable Night Mode** – Customizable start and end times for night mode (display and LED off)
-- **Hourly LED Blink** – Optional status LED blink at the start of each hour (can be disabled)
-- **Outdoor Weather** – Open-Meteo request includes `current`, `hourly`, and `daily`; update interval 1–24 hours; WiFi only for the request; updates when display is on. **Interval timing** uses `storedEpoch` / `local`, not libc `time()`.
-- **Detailed weather screen (GPIO4, 128x64)** – 5 pages of cached weather data (no extra HTTP on button press): temperature/feels-like, wind, humidity+pressure, current icon+precip+nearest night minimum, and 3-day forward forecast with icons.
-- **Deep Sleep Strategy** – ESP32-C3 sleeps between updates while OLED keeps the previous frame (restores instantly on wake)
-- **Status Codes (optional)** – Two-character diagnostic codes (A1, B2, …) can be enabled via web interface
+- `GET /settings/export`
+- `POST /settings/import`
 
-## Configuration
+### Security policy
 
-### Web Configuration Interface
+- WiFi credentials are never exported to JSON.
+- WiFi credentials are never imported from JSON.
 
-The device automatically enters setup mode on first boot or when WiFi credentials are missing/invalid. **All settings can be configured via web interface - no code modification needed!**
+### Default template
 
-**Setup Process:**
+Root file `settings.json` contains baseline defaults for provisioning and mass setup.
 
-1. **First Boot**: Device creates WiFi access point `CelsiusClock` (password: `12345678`)
-2. **Connect**: Join the `CelsiusClock` network from your phone/computer
-3. **Configure**: Open browser to `http://192.168.4.1` (or IP shown on display)
-4. **Configure Settings**: Fill in all settings in the web form (see available settings below)
-5. **Save**: Click "Save and Reset" to apply all settings
-6. **Done**: Device reboots and connects to your WiFi network automatically
+## OTA
 
-**Available Settings:**
+### Web OTA
 
-**WiFi Settings:**
-- WiFi SSID
-- WiFi Password
+- Upload `Celsius.ino.bin` from setup page.
+- Prechecks:
+  - setup mode only,
+  - OTA partition available,
+  - battery above threshold (`OTA_MIN_BATTERY_V`).
 
-**Display Settings:**
-- Show debug codes (enable/disable diagnostic codes on OLED)
-- Show date (toggle date display)
-- Show weekday (toggle weekday display)
-- 24-hour format (12/24-hour time format)
-- Hourly LED blink (enable/disable LED blink at start of each hour)
-- Weekday in Russian (English/Russian weekday language)
+### AutoOTA
 
-**Night Mode:**
-- Night start time (hours and minutes)
-- Night end time (hours and minutes)
+- Manifest URL is branch-aware (`AUTOOTA_BRANCH`).
+- Checks are constrained by time/day state and battery threshold.
+- Interval is configurable in admin (`autoOtaCheckHours`).
 
-**NTP Sync Settings:**
-- Days between NTP syncs (1-30 days)
-  - Controls how often the device synchronizes time with NTP servers
-  - Default: 1 day (can be increased to reduce WiFi usage)
-  - Longer intervals reduce power consumption but may result in less accurate time
+## Pins (ESP32-C3)
 
-**Time Correction:**
-- Time correction (seconds per day) - Manual correction for quartz crystal inaccuracy
-  - Positive value: speeds up the clock (use if clock is running slow)
-  - Negative value: slows down the clock (use if clock is running fast)
-  - Default: 0 (no correction)
-  - Example: If clock is 4 minutes slow per day, enter `240` (4 minutes × 60 seconds)
+- I2C SDA: GPIO8
+- I2C SCL: GPIO9
+- LED: GPIO0
+- Setup button: GPIO1
+- Weather/detail button wake: GPIO4 (LOW to GND)
+- BMI160 INT1 wake: GPIO5 (optional, HIGH wake)
+- Battery ADC: GPIO3
+- OLED I2C address: `0x3C`
 
-**Weather Settings:**
-- Latitude / Longitude — geolocation used to build Open-Meteo URL automatically
-- Weather API URL — auto-generated Open-Meteo URL (stored in EEPROM, max length **767** chars + `\0`)
-  - Uses `forecast_days=4` so the forecast page can show exactly **3 days ahead** (starting from tomorrow)
-- Update interval (hours) – how often to fetch weather (1–24 hours, default: 1). Updates run only when the display is on (not in night mode). After each fetch, WiFi is disconnected; it is reconnected only before the next scheduled update.
-- **Weather screen timeout / detail screen (seconds)** – how long the GPIO4 detail view stays on screen after wake or while the pin is held (1–60 s, default: 10). Does **not** trigger a network request by itself.
+## Display Behavior (128x64)
 
-**OTA Update (Setup page):**
-- Upload the application binary (`Celsius.ino.bin`) from the same web page
-- Requires AP password confirmation
-- OTA is blocked on low battery and when OTA partition is unavailable
+- Top row: weekday/date + battery icon.
+- Main area: large time.
+- Bottom row: outdoor + indoor values.
+- Detailed weather by GPIO4: 5 screens from cached RTC weather data:
+  1. Current outdoor temperature + feels-like
+  2. Wind speed + direction
+  3. Humidity + pressure
+  4. Current icon + precipitation + nearest night minimum
+  5. Forecast for tomorrow + next 2 days
 
-**Setup Mode Behavior:**
+## Build/Dependencies
 
-- Device displays "Setup mode" on the OLED with SSID and IP address
-- Web server runs at maximum CPU frequency (160 MHz) for responsiveness
-- Device does not enter deep sleep in setup mode
-- If WiFi connection fails after configuration, device automatically returns to setup mode
-- All settings (WiFi credentials and device preferences) are stored in EEPROM and persist across reboots
+Required Arduino libraries:
 
-**Resetting Settings:**
+- GyverOLED
+- NTPClient
+- ArduinoJson
+- Adafruit SHT31 (if SHT31 is selected)
+- Adafruit AHTX0 (if AHT20/AHT21 is selected)
+- Adafruit BMP280 (if AHT20+BMP280 is selected)
+- Adafruit HTU21DF (if HTU21 is selected)
 
-There are two ways to reset settings and return to setup mode:
+Built-in core libs:
 
-1. **Via Web Interface** (when already in setup mode):
-   - Open the setup page at `http://192.168.4.1`
-   - Click the "Reset Settings" button
-   - Device will clear settings and reboot into setup mode
-
-2. **Via GPIO Reset** (hardware method):
-   - Short GPIO 0 (LED pin) to GND (ground) while powering on the device
-   - Hold for at least 50ms during startup
-   - Device will detect the reset condition, clear settings, and enter setup mode
-   - Diagnostic code I1 will be displayed on screen
-
-### Code Configuration (Optional)
-
-Most settings can be configured via web interface. The following settings can only be changed in code:
-
-1. **Timezone** (line 85):
-   ```cpp
-   NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 60000);
-   ```
-   Time is set to GMT+3. Change `3 * 3600` to your timezone offset if needed.
-
-2. **Setup Mode AP** (lines 14-15):
-   ```cpp
-   #define AP_SSID "CelsiusClock"
-   #define AP_PASSWORD "12345678"
-   ```
-
-**Note:** All other settings (display options, night mode times, debug codes, NTP sync period, etc.) can be configured via web interface and are stored in EEPROM.
-
-## Pin Configuration
-
-- **I2C SDA**: GPIO 8
-- **I2C SCL**: GPIO 9
-- **LED**: GPIO 0
-- **Weather / detail screen button** (optional): GPIO 4 — connect to GND to wake and show cached detailed weather (internal pull-up)
-- **BMI160 INT1** (optional): GPIO 5 — movement/flip interrupt wake source from BMI160
-- **Battery Monitor**: GPIO 3 (ADC with 11dB attenuation, 0-2.5V range) - requires voltage divider with two 100 kΩ resistors (1:1 ratio)
-- **OLED Address**: 0x3C
-- **SHT31 Address**: 0x44
-
-## Installation
-
-1. Install the ESP32 Arduino Core in Arduino IDE
-2. Install required libraries via Library Manager:
-   - Adafruit GFX Library
-   - Adafruit SSD1306
-   - Adafruit SHT31
-   - NTPClient
-   - ArduinoJson (for weather API)
-   - (optional) DFRobot_BMI160
-3. (Optional) Adjust timezone in the code if needed (all other settings can be configured via web interface)
-4. Upload the sketch to your ESP32-C3
-5. Connect the hardware according to the pin configuration
-6. On first boot, the device will enter setup mode automatically - configure WiFi and all device settings via web interface (see Web Configuration Interface section above)
-
-## Display Layout
-
-The display layout is customizable via web interface:
-
-- **Top**: 5-bar battery indicator (always shown)
-- **Date and weekday** (optional, can be disabled): Date in DD.MM format; weekday abbreviation (Russian: ПН/ВТ/СР/ЧТ/ПТ/СБ/ВС or English: MO/TU/WE/TH/FR/SA/SU). В ветке **128x64** дата и день недели в одной строке: дата слева, день недели сразу после даты (например `26.01  ПН`); индикатор заряда — иконка батарейки в правом верхнем углу.
-- **Time section**: Hours and minutes in large font (12 or 24-hour format, configurable)
-- **Bottom**: Indoor temperature (°C) and humidity (%) from AHT20 (always shown); outdoor temperature from Open-Meteo
-- **Detailed weather (GPIO4):** 5 pages on 128x64:
-  1) outdoor + feels-like, 2) wind speed/direction, 3) humidity + pressure, 4) current icon + precipitation + nearest-night minimum, 5) forecast for tomorrow/next 2 days
-
-All display elements (except battery indicator and temperature/humidity) can be toggled on/off via web interface.
+- `WiFi.h`, `WiFiUdp.h`, `Wire.h`, `WebServer.h`, `EEPROM.h`, `Update.h`
 
 ## Notes
 
-- **Web Configuration**: All device settings (WiFi credentials, display options, night mode times, etc.) can be configured via web interface. Settings are stored in EEPROM and persist across reboots. No code modification is required for normal operation.
-- **WiFi Configuration**: The device automatically enters setup mode if WiFi credentials are missing or if WiFi network becomes unavailable. In setup mode, the device creates an access point (`CelsiusClock`) and runs a web server for configuration. The device does not attempt NTP synchronization until WiFi is properly configured and available.
-- **Time Storage**: The clock stores the last valid epoch in RTC memory, so it keeps ticking even without WiFi between syncs. The NTP sync period is configurable via web interface (1-30 days, default: 1 day).
-- **Time Drift Correction**: The device automatically measures and compensates for RTC drift between NTP synchronizations. After the second sync, the drift rate is calculated and applied continuously. This compensates for typical ESP32-C3 RTC drift (e.g., ~3 minutes per day) without requiring more frequent WiFi syncs.
-- **Manual Time Correction**: In addition to automatic drift correction, you can manually adjust for quartz crystal inaccuracy using the "Time correction" setting in the web interface. This correction is applied continuously and proportionally to elapsed time. For example, if your clock is consistently 4 minutes slow per day, set the correction to `240` (positive value to speed up). The correction accumulates between NTP syncs, significantly reducing time deviation. This is especially useful when the automatic drift correction alone is insufficient or when you need precise calibration for your specific hardware.
-- **Setup Mode**: When in setup mode, the device runs at maximum CPU frequency (160 MHz) and does not enter deep sleep. After settings are configured and saved, the device reboots and returns to normal operation with deep sleep.
-- **Night Mode**: Night mode times are fully configurable via web interface (start and end hours/minutes). During night mode, the display and LED are turned off to save power.
-- **Display Customization**: All display elements (date, weekday, time format, debug codes) can be toggled on/off via web interface. Weekday language can be switched between English and Russian.
-- **Weather & WiFi**: The device connects to WiFi only when it is time to update weather (and when the display is on). After the HTTP request, WiFi is disconnected and switched off (`WiFi.disconnect(true)` and `WiFi.mode(WIFI_OFF)`), so the radio is not left on between updates. On the next scheduled update, WiFi is connected again. This keeps power usage low.
-- **Weather interval & detailed screen**: The “last update” timestamp uses `local` / `storedEpoch`. Opening detailed weather does not trigger network traffic; it shows RTC-cached fields from the last successful response.
-- **EEPROM size**: increased to 2048 bytes to safely store the enlarged settings struct (including long generated weather URL); protected by compile-time `static_assert`.
-- Battery sampling is throttled (`BATTERY_RECHECK_SEC`, default 15 min) to reduce divider losses; adjust if you need more frequent updates.
-- Status codes are disabled by default; can be enabled via web interface for quick troubleshooting directly on the OLED.
+- EEPROM settings are protected by size check (`static_assert`).
+- Device stays in low-power profile between active cycles.
+- Weather and NTP use explicit WiFi connect/disconnect strategy to reduce power consumption.
 
 ## License
 
-This project is open source and available for personal and educational use.
+Open source for personal and educational use.
 

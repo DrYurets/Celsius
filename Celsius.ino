@@ -12,6 +12,9 @@
 #include <cstring>
 #include <GyverOLED.h>
 #include <Adafruit_SHT31.h>
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP280.h>
+#include <Adafruit_HTU21DF.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h>
@@ -23,6 +26,10 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <AutoOTA.h>
+#include <ArduinoJson.h>
+#include "sensors/bmi160/BMI160Motion.h"
+#include "sensors/SensorTypes.h"
+#include "sensors/SensorManager.h"
 #include "WeatherAPI.h"
 #include "WeatherDetailScreens.h"
 
@@ -39,6 +46,9 @@
 #define SSD1306_WHITE 1
 #define SSD1306_SWITCHCAPVCC 0
 #define SHT31_ADDR 0x44
+#define AHT20_ADDR 0x38
+#define BMP280_ADDR 0x76
+#define BMP280_ADDR_ALT 0x77
 #define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
 #define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
 #define LED_PIN 0
@@ -56,6 +66,7 @@
 #define WEATHER_SOURCE_OPEN_METEO 0
 #define UI_LANG_RU 0
 #define UI_LANG_EN 1
+#define DEFAULT_TIMEZONE_MINUTES 180
 #define WEEKDAY_MASK_ALL 0x7F
 #define WEEKDAY_MASK_WORKDAYS 0x1F
 #define WEATHER_API_URL_BUF_SIZE 768  // запас для расширенного Open-Meteo URL (current+hourly+daily)
@@ -83,8 +94,8 @@
 #define CODE_NTP_SYNC "NTP sync"                      // процесс синхронизации NTP
 #define CODE_NTP_OK "NTP sync ok"                     // время успешно синхронизировано
 #define CODE_NTP_ERROR "NTP error"                    // ошибка NTP
-#define CODE_SENSOR_OK "SHT Sensor found"             // датчик SHT31 найден
-#define CODE_SENSOR_MISSING "SHT Sensor missing"      // датчик SHT31 отсутствует
+#define CODE_SENSOR_OK "Indoor sensor found"          // выбранный датчик температуры/влажности найден
+#define CODE_SENSOR_MISSING "Indoor sensor missing"   // выбранный датчик температуры/влажности отсутствует
 #define CODE_FIRST_SYNC "First sync"                  // первая синхронизация
 #define CODE_SETUP_DONE "Setup done"                  // завершение setup
 #define CODE_MEASURE_INFO "Battery Measure info"      // минутное измерение батареи
@@ -179,6 +190,9 @@ class OledDisplayCompat {
 
 OledDisplayCompat display;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
+Adafruit_AHTX0 aht20;
+Adafruit_BMP280 bmp280;
+Adafruit_HTU21DF htu21 = Adafruit_HTU21DF();
 WiFiUDP ntpUDP;
 WebServer server(80);
 const char *ntpServers[] = {
@@ -233,6 +247,7 @@ struct DeviceSettings {
   uint8_t nightEndM;
   bool weekdayLanguageRu;        // true = Russian, false = English
   uint8_t uiLanguage;            // 0=Russian, 1=English (веб-панель/будущая локализация)
+  int16_t timezoneMinutes;       // часовой пояс в минутах (например GMT+3 = 180)
   int32_t timeCorrectionPerDay;  // коррекция времени в секундах в сутки (положительное = ускорение, отрицательное = замедление)
   uint8_t syncDays;              // количество суток между синхронизациями NTP
   bool weatherEnabled;           // включить получение погоды
@@ -242,6 +257,8 @@ struct DeviceSettings {
   char weatherApiUrl[WEATHER_API_URL_BUF_SIZE];  // URL API для получения погоды
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
+  uint8_t tempSensorType;        // выбранный датчик температуры/влажности
+  bool bmi160Enabled;            // использовать ли BMI160 для wake/детекта движения
   bool autoOtaEnabled;           // автоматическая проверка и установка OTA
   uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
@@ -262,6 +279,7 @@ static DeviceSettings settings = {
   .nightEndM = 0,
   .weekdayLanguageRu = true,
   .uiLanguage = UI_LANG_RU,
+  .timezoneMinutes = DEFAULT_TIMEZONE_MINUTES,
   .timeCorrectionPerDay = 0,
   .syncDays = 1,
   .weatherEnabled = true,
@@ -271,6 +289,8 @@ static DeviceSettings settings = {
   .weatherApiUrl = "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Europe%2FMoscow&past_days=0&forecast_days=4&wind_speed_unit=ms",
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
+  .tempSensorType = TEMP_SENSOR_SHT31,
+  .bmi160Enabled = true,
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
   .activeWeekdaysMask = WEEKDAY_MASK_ALL
@@ -294,6 +314,10 @@ static bool parseFloatQueryParam(const char *url, const char *key, float &outVal
   return true;
 }
 
+static long getTimezoneOffsetSeconds() {
+  return (long)settings.timezoneMinutes * 60L;
+}
+
 static bool isValidLatitude(float lat) {
   return isfinite(lat) && lat >= -90.0f && lat <= 90.0f;
 }
@@ -313,94 +337,10 @@ static void rebuildOpenMeteoUrlFromCoordinates() {
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
+static bool indoorBmpOk = false;
 static bool displayOn = true;
 static bool wokeByWeatherButton = false;
 static bool wokeByMotionSensor = false;
-
-// BMI160 (минимальная конфигурация прерывания "any-motion" на INT1)
-#define BMI160_I2C_ADDR 0x68
-#define BMI160_CHIP_ID_REG 0x00
-#define BMI160_CHIP_ID 0xD1
-#define BMI160_CMD_REG 0x7E
-#define BMI160_ACC_CONF_REG 0x40
-#define BMI160_ACC_RANGE_REG 0x41
-#define BMI160_INT_EN_0_REG 0x50
-#define BMI160_INT_OUT_CTRL_REG 0x53
-#define BMI160_INT_LATCH_REG 0x54
-#define BMI160_INT_MAP_0_REG 0x55
-#define BMI160_INT_MOTION_0_REG 0x5F
-#define BMI160_INT_MOTION_1_REG 0x60
-#define BMI160_INT_STATUS_0_REG 0x1C
-
-bool bmi160WriteReg(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(BMI160_I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
-}
-
-bool bmi160ReadReg(uint8_t reg, uint8_t &value) {
-  Wire.beginTransmission(BMI160_I2C_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) {
-    return false;
-  }
-  if (Wire.requestFrom(BMI160_I2C_ADDR, (uint8_t)1) != 1) {
-    return false;
-  }
-  value = Wire.read();
-  return true;
-}
-
-bool initBMI160MotionWake() {
-  uint8_t chipId = 0;
-  if (!bmi160ReadReg(BMI160_CHIP_ID_REG, chipId) || chipId != BMI160_CHIP_ID) {
-    return false;
-  }
-
-  // Soft reset, затем normal mode для акселерометра
-  bmi160WriteReg(BMI160_CMD_REG, 0xB6);
-  delay(15);
-  bmi160WriteReg(BMI160_CMD_REG, 0x11);
-  delay(5);
-
-  // ODR 100Hz, normal avg4, +/-4g
-  bmi160WriteReg(BMI160_ACC_CONF_REG, 0x28);
-  bmi160WriteReg(BMI160_ACC_RANGE_REG, 0x05);
-
-  // Any-motion: duration ~2 samples, threshold умеренный (против ложных срабатываний)
-  bmi160WriteReg(BMI160_INT_MOTION_0_REG, 0x02);
-  bmi160WriteReg(BMI160_INT_MOTION_1_REG, 0x14);
-
-  // Включить any-motion по X/Y/Z
-  bmi160WriteReg(BMI160_INT_EN_0_REG, 0x07);
-
-  // INT1: output enable, push-pull, active HIGH
-  // bit0=int1_output_en, bit1=int1_od, bit2=int1_lvl, bit3=int1_input_en
-  // 0x05 => output enabled, push-pull, active high
-  bmi160WriteReg(BMI160_INT_OUT_CTRL_REG, 0x05);
-
-  // Latch interrupt (удержание уровня) для надёжного wake из deep sleep
-  // 0x0F = latch until reset/status clear
-  bmi160WriteReg(BMI160_INT_LATCH_REG, 0x0F);
-
-  // Map any-motion to INT1
-  bmi160WriteReg(BMI160_INT_MAP_0_REG, 0x04);
-
-  // Диагностика: читаем обратно критичные регистры
-  uint8_t regAccConf = 0, regAccRange = 0, regIntEn0 = 0, regIntOut = 0, regLatch = 0, regMap0 = 0, regStat0 = 0;
-  bmi160ReadReg(BMI160_ACC_CONF_REG, regAccConf);
-  bmi160ReadReg(BMI160_ACC_RANGE_REG, regAccRange);
-  bmi160ReadReg(BMI160_INT_EN_0_REG, regIntEn0);
-  bmi160ReadReg(BMI160_INT_OUT_CTRL_REG, regIntOut);
-  bmi160ReadReg(BMI160_INT_LATCH_REG, regLatch);
-  bmi160ReadReg(BMI160_INT_MAP_0_REG, regMap0);
-  bmi160ReadReg(BMI160_INT_STATUS_0_REG, regStat0);
-  Serial.printf("BMI160 regs accConf=0x%02X accRange=0x%02X intEn0=0x%02X intOut=0x%02X latch=0x%02X map0=0x%02X stat0=0x%02X\n",
-                regAccConf, regAccRange, regIntEn0, regIntOut, regLatch, regMap0, regStat0);
-
-  return true;
-}
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -581,6 +521,7 @@ void loadSettings() {
     settings.nightEndM = 0;
     settings.weekdayLanguageRu = true;
     settings.uiLanguage = UI_LANG_RU;
+    settings.timezoneMinutes = DEFAULT_TIMEZONE_MINUTES;
     settings.timeCorrectionPerDay = 0;
     settings.syncDays = 1;
     settings.weatherEnabled = true;
@@ -590,6 +531,8 @@ void loadSettings() {
     rebuildOpenMeteoUrlFromCoordinates();
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
+    settings.tempSensorType = TEMP_SENSOR_SHT31;
+    settings.bmi160Enabled = true;
     settings.autoOtaEnabled = true;
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
@@ -626,6 +569,13 @@ void loadSettings() {
   if (settings.weatherScreenSeconds == 0 || settings.weatherScreenSeconds > 60) {
     settings.weatherScreenSeconds = 10;
   }
+  if (settings.timezoneMinutes < -720 || settings.timezoneMinutes > 840) {
+    settings.timezoneMinutes = DEFAULT_TIMEZONE_MINUTES;
+  }
+  if (settings.tempSensorType > TEMP_SENSOR_HTU21) {
+    settings.tempSensorType = TEMP_SENSOR_SHT31;
+  }
+  settings.bmi160Enabled = settings.bmi160Enabled ? true : false;
   if (settings.autoOtaCheckHours < AUTOOTA_CHECK_INTERVAL_HOURS_MIN ||
       settings.autoOtaCheckHours > AUTOOTA_CHECK_INTERVAL_HOURS_MAX) {
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
@@ -642,6 +592,158 @@ void saveSettings() {
   }
   EEPROM.commit();
   EEPROM.end();
+}
+
+bool exportSettingsToJson(String &outJson) {
+  DynamicJsonDocument doc(4096);
+  doc["schemaVersion"] = 1;
+  doc["romVersion"] = ROM_VERSION;
+
+  JsonObject wifi = doc.createNestedObject("wifi");
+  wifi["includeCredentials"] = false;
+
+  JsonObject displayCfg = doc.createNestedObject("display");
+  displayCfg["showDebugCodes"] = settings.showDebugCodes;
+  displayCfg["showDate"] = settings.showDate;
+  displayCfg["showWeekday"] = settings.showWeekday;
+  displayCfg["timeFormat24h"] = settings.timeFormat24h;
+  displayCfg["hourlyBlink"] = settings.hourlyBlink;
+  displayCfg["weekdayLanguageRu"] = settings.weekdayLanguageRu;
+  displayCfg["uiLanguage"] = (settings.uiLanguage == UI_LANG_EN) ? "en" : "ru";
+
+  JsonObject night = doc.createNestedObject("nightMode");
+  night["startH"] = settings.nightStartH;
+  night["startM"] = settings.nightStartM;
+  night["endH"] = settings.nightEndH;
+  night["endM"] = settings.nightEndM;
+
+  JsonObject timeCfg = doc.createNestedObject("time");
+  timeCfg["timezoneMinutes"] = settings.timezoneMinutes;
+  timeCfg["timeCorrectionPerDay"] = settings.timeCorrectionPerDay;
+  timeCfg["activeWeekdaysMask"] = settings.activeWeekdaysMask;
+
+  JsonObject sensors = doc.createNestedObject("sensors");
+  sensors["tempSensorType"] = tempSensorTypeToFormValue(settings.tempSensorType);
+  sensors["bmi160Enabled"] = settings.bmi160Enabled;
+
+  JsonObject weather = doc.createNestedObject("weather");
+  weather["enabled"] = settings.weatherEnabled;
+  weather["latitude"] = settings.weatherLatitude;
+  weather["longitude"] = settings.weatherLongitude;
+  weather["updateHours"] = settings.weatherUpdateHours;
+  weather["screenSeconds"] = settings.weatherScreenSeconds;
+
+  JsonObject autoOta = doc.createNestedObject("autoOta");
+  autoOta["enabled"] = settings.autoOtaEnabled;
+  autoOta["checkHours"] = settings.autoOtaCheckHours;
+
+  outJson = "";
+  serializeJsonPretty(doc, outJson);
+  return outJson.length() > 0;
+}
+
+bool importSettingsFromJson(const String &json, String &error) {
+  DynamicJsonDocument doc(4096);
+  DeserializationError parseError = deserializeJson(doc, json);
+  if (parseError) {
+    error = String("JSON parse error: ") + parseError.c_str();
+    return false;
+  }
+
+  DeviceSettings newSettings = settings;
+  // Security policy: WiFi credentials are never imported from JSON.
+
+  JsonObject displayCfg = doc["display"];
+  if (!displayCfg.isNull()) {
+    if (displayCfg.containsKey("showDebugCodes")) newSettings.showDebugCodes = displayCfg["showDebugCodes"];
+    if (displayCfg.containsKey("showDate")) newSettings.showDate = displayCfg["showDate"];
+    if (displayCfg.containsKey("showWeekday")) newSettings.showWeekday = displayCfg["showWeekday"];
+    if (displayCfg.containsKey("timeFormat24h")) newSettings.timeFormat24h = displayCfg["timeFormat24h"];
+    if (displayCfg.containsKey("hourlyBlink")) newSettings.hourlyBlink = displayCfg["hourlyBlink"];
+    if (displayCfg.containsKey("weekdayLanguageRu")) newSettings.weekdayLanguageRu = displayCfg["weekdayLanguageRu"];
+    const char *lang = displayCfg["uiLanguage"] | nullptr;
+    if (lang) {
+      newSettings.uiLanguage = (strcmp(lang, "en") == 0) ? UI_LANG_EN : UI_LANG_RU;
+    }
+  }
+
+  JsonObject night = doc["nightMode"];
+  if (!night.isNull()) {
+    if (night.containsKey("startH")) newSettings.nightStartH = night["startH"];
+    if (night.containsKey("startM")) newSettings.nightStartM = night["startM"];
+    if (night.containsKey("endH")) newSettings.nightEndH = night["endH"];
+    if (night.containsKey("endM")) newSettings.nightEndM = night["endM"];
+  }
+
+  JsonObject timeCfg = doc["time"];
+  if (!timeCfg.isNull()) {
+    if (timeCfg.containsKey("timezoneMinutes")) newSettings.timezoneMinutes = timeCfg["timezoneMinutes"];
+    if (timeCfg.containsKey("timeCorrectionPerDay")) newSettings.timeCorrectionPerDay = timeCfg["timeCorrectionPerDay"];
+    if (timeCfg.containsKey("activeWeekdaysMask")) newSettings.activeWeekdaysMask = timeCfg["activeWeekdaysMask"];
+  }
+
+  JsonObject sensors = doc["sensors"];
+  if (!sensors.isNull()) {
+    const char *sensorType = sensors["tempSensorType"] | nullptr;
+    if (sensorType) {
+      newSettings.tempSensorType = parseTempSensorType(String(sensorType));
+    }
+    if (sensors.containsKey("bmi160Enabled")) newSettings.bmi160Enabled = sensors["bmi160Enabled"];
+  }
+
+  JsonObject weather = doc["weather"];
+  if (!weather.isNull()) {
+    if (weather.containsKey("enabled")) newSettings.weatherEnabled = weather["enabled"];
+    if (weather.containsKey("latitude")) newSettings.weatherLatitude = weather["latitude"];
+    if (weather.containsKey("longitude")) newSettings.weatherLongitude = weather["longitude"];
+    if (weather.containsKey("updateHours")) newSettings.weatherUpdateHours = weather["updateHours"];
+    if (weather.containsKey("screenSeconds")) newSettings.weatherScreenSeconds = weather["screenSeconds"];
+  }
+
+  JsonObject autoOta = doc["autoOta"];
+  if (!autoOta.isNull()) {
+    if (autoOta.containsKey("enabled")) newSettings.autoOtaEnabled = autoOta["enabled"];
+    if (autoOta.containsKey("checkHours")) newSettings.autoOtaCheckHours = autoOta["checkHours"];
+  }
+
+  if (newSettings.nightStartH > 23 || newSettings.nightStartM > 59 ||
+      newSettings.nightEndH > 23 || newSettings.nightEndM > 59) {
+    error = "Invalid night mode time";
+    return false;
+  }
+  if (newSettings.weatherUpdateHours < 1 || newSettings.weatherUpdateHours > 24) {
+    error = "weather.updateHours must be 1..24";
+    return false;
+  }
+  if (newSettings.weatherScreenSeconds < 1 || newSettings.weatherScreenSeconds > 60) {
+    error = "weather.screenSeconds must be 1..60";
+    return false;
+  }
+  if (newSettings.timezoneMinutes < -720 || newSettings.timezoneMinutes > 840) {
+    error = "time.timezoneMinutes must be -720..840";
+    return false;
+  }
+  if (newSettings.autoOtaCheckHours < AUTOOTA_CHECK_INTERVAL_HOURS_MIN ||
+      newSettings.autoOtaCheckHours > AUTOOTA_CHECK_INTERVAL_HOURS_MAX) {
+    error = "autoOta.checkHours out of range";
+    return false;
+  }
+  if (!isValidLatitude(newSettings.weatherLatitude) || !isValidLongitude(newSettings.weatherLongitude)) {
+    error = "Invalid weather coordinates";
+    return false;
+  }
+
+  newSettings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
+  if (newSettings.activeWeekdaysMask == 0) {
+    newSettings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
+  }
+
+  settings = newSettings;
+  rebuildOpenMeteoUrlFromCoordinates();
+  saveSettings();
+
+  error = "";
+  return true;
 }
 
 // ---------- веб-сервер функции ----------
@@ -671,9 +773,10 @@ bool readIndoorSensors(float &t, float &h) {
   if (!sensorOK) {
     return false;
   }
-  float tRead = sht31.readTemperature();
-  float hRead = sht31.readHumidity();
-  if (isnan(tRead) || isnan(hRead)) {
+  float tRead = NAN;
+  float hRead = NAN;
+  bool readOk = readSelectedIndoorSensor(settings.tempSensorType, sht31, aht20, htu21, tRead, hRead);
+  if (!readOk || isnan(tRead) || isnan(hRead)) {
     return false;
   }
   t = tRead;
@@ -931,6 +1034,7 @@ bool ntpSync() {
   }
   logToDisplay(CODE_NTP_SYNC, nullptr, 0);
   timeClient.begin();
+  timeClient.setTimeOffset(getTimezoneOffsetSeconds());
   timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
   bool ok = timeClient.forceUpdate();
   if (ok) {
@@ -967,6 +1071,7 @@ static bool ntpSyncOverConnectedWiFi() {
   }
   logToDisplay(CODE_NTP_SYNC, nullptr, 0);
   timeClient.begin();
+  timeClient.setTimeOffset(getTimezoneOffsetSeconds());
   timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
   bool ok = timeClient.forceUpdate();
   if (ok) {
@@ -1245,11 +1350,13 @@ void enterDeepSleep(uint32_t sleepSeconds) {
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
-  pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
-  gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
-  gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
   esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
-  esp_deep_sleep_enable_gpio_wakeup((1ULL << BMI160_INT1_PIN), ESP_GPIO_WAKEUP_GPIO_HIGH);
+  if (settings.bmi160Enabled) {
+    pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
+    gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
+    gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
+    esp_deep_sleep_enable_gpio_wakeup((1ULL << BMI160_INT1_PIN), ESP_GPIO_WAKEUP_GPIO_HIGH);
+  }
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
 }
@@ -1309,28 +1416,50 @@ void setup() {
   setBrightness(0x01);
   display.display();
 
-  sensorOK = sht31.begin(SHT31_ADDR);
+  // Загрузка настроек устройства
+  loadSettings();
+
+  if (settings.tempSensorType > TEMP_SENSOR_HTU21) {
+    settings.tempSensorType = TEMP_SENSOR_SHT31;
+  }
+  IndoorSensorInitResult sensorInit = initSelectedIndoorSensor(settings.tempSensorType,
+                                                               sht31,
+                                                               aht20,
+                                                               bmp280,
+                                                               htu21,
+                                                               &Wire,
+                                                               SHT31_ADDR,
+                                                               AHT20_ADDR,
+                                                               BMP280_ADDR,
+                                                               BMP280_ADDR_ALT);
+  sensorOK = sensorInit.sensorOk;
+  indoorBmpOk = sensorInit.bmpOk;
+  Serial.printf("Sensor %s=%d, BMP280=%d\n",
+                indoorSensorName(settings.tempSensorType),
+                (int)sensorOK,
+                (int)indoorBmpOk);
   logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
-  Serial.printf("SHT31=%d\n", (int)sensorOK);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
-  pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
-  gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
-  gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
   Serial.printf("Weather button GPIO%d state=%d\n", WEATHER_BUTTON_PIN, digitalRead(WEATHER_BUTTON_PIN));
-  bool bmi160OK = initBMI160MotionWake();
-  logToDisplay(bmi160OK ? CODE_BMI160_OK : CODE_BMI160_ERR);
-  Serial.printf("BMI160 INT1 GPIO%d state=%d, wakeByMotion=%d\n",
-                BMI160_INT1_PIN,
-                digitalRead(BMI160_INT1_PIN),
-                (int)wokeByMotionSensor);
-
-  // Загрузка настроек устройства
-  loadSettings();
+  if (settings.bmi160Enabled) {
+    pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
+    gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
+    gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
+    bool bmi160OK = initBMI160MotionWake();
+    logToDisplay(bmi160OK ? CODE_BMI160_OK : CODE_BMI160_ERR);
+    Serial.printf("BMI160 INT1 GPIO%d state=%d, wakeByMotion=%d\n",
+                  BMI160_INT1_PIN,
+                  digitalRead(BMI160_INT1_PIN),
+                  (int)wokeByMotionSensor);
+  } else {
+    wokeByMotionSensor = false;
+    Serial.println("BMI160 is disabled in settings");
+  }
 
   if (setupModeRequested) {
     logToDisplay(CODE_CONFIG_MODE, "GPIO1 forced");

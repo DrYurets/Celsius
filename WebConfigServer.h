@@ -1,6 +1,8 @@
 #ifndef WEB_CONFIG_SERVER_H
 #define WEB_CONFIG_SERVER_H
 
+#include "sensors/SensorTypes.h"
+
 static bool otaPrecheck(String &reason) {
   if (!configMode) {
     reason = "OTA is allowed only in setup mode.";
@@ -32,12 +34,15 @@ static String otaStatusHtml() {
 
 void handleOtaUpload();
 void handleOtaDone();
+void handleSettingsExport();
+void handleSettingsImport();
 
 String getConfigPage() {
   uint8_t weekdaysMask = settings.activeWeekdaysMask & WEEKDAY_MASK_ALL;
   if (weekdaysMask == 0) {
     weekdaysMask = WEEKDAY_MASK_ALL;
   }
+  const char *selectedTempSensor = tempSensorTypeToFormValue(settings.tempSensorType);
 
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
@@ -47,9 +52,15 @@ String getConfigPage() {
   html += "h1, h2 { color: #4CAF50; }";
   html += "input, select { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box; }";
   html += "input[type='checkbox'] { width: auto; margin-right: 10px; }";
+  html += "input[type='radio'] { width: auto; margin-right: 10px; }";
   html += ".checkbox-label { display: flex; align-items: center; margin: 10px 0; }";
+  html += ".radio-label { display: flex; align-items: center; margin: 10px 0; }";
   html += ".time-group { display: flex; gap: 10px; }";
   html += ".time-group input { width: 50%; }";
+  html += ".sensor-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 14px 0; }";
+  html += ".sensor-card { border: 1px solid #555; border-radius: 8px; padding: 8px; background: #242424; }";
+  html += ".sensor-card img { width: 100%; height: 92px; object-fit: cover; border-radius: 6px; display: block; margin-bottom: 6px; }";
+  html += ".sensor-card .name { font-size: 12px; color: #ddd; text-align: center; }";
   html += "button { background: #4CAF50; color: white; padding: 15px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 16px; }";
   html += "button:hover { background: #45a049; }";
   html += ".container { background: #2a2a2a; padding: 20px; border-radius: 10px; }";
@@ -78,6 +89,23 @@ String getConfigPage() {
   html += "<option value='en' " + String(settings.uiLanguage == UI_LANG_EN ? "selected" : "") + ">English</option>";
   html += "</select>";
 
+  html += "<h2>Device Configuration</h2>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Select the installed sensors. Temperature sensor can be only one.</p>";
+  html += "<div class='sensor-gallery'>";
+  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/sht31/sht31.jpg' alt='SHT31'><div class='name'>SHT31</div></div>";
+  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/aht20bmp280/aht20bmp280.jpg' alt='AHT20+BMP280'><div class='name'>AHT20+BMP280</div></div>";
+  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/aht21/aht21.jpg' alt='AHT21'><div class='name'>AHT21</div></div>";
+  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/htu21/htu21.jpg' alt='HTU21'><div class='name'>HTU21</div></div>";
+  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/bmi160/bmi160.jpg' alt='BMI160'><div class='name'>BMI160 (Gyro/Motion)</div></div>";
+  html += "</div>";
+  html += "<label>Temperature/Humidity sensor:</label>";
+  html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='sht31' " + String(strcmp(selectedTempSensor, "sht31") == 0 ? "checked" : "") + "><label>SHT31</label></div>";
+  html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht20bmp280' " + String(strcmp(selectedTempSensor, "aht20bmp280") == 0 ? "checked" : "") + "><label>AHT20 + BMP280</label></div>";
+  html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht21' " + String(strcmp(selectedTempSensor, "aht21") == 0 ? "checked" : "") + "><label>AHT21</label></div>";
+  html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='htu21' " + String(strcmp(selectedTempSensor, "htu21") == 0 ? "checked" : "") + "><label>HTU21</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='enableBmi160' " + String(settings.bmi160Enabled ? "checked" : "") + "><label>Enable BMI160 motion sensor</label></div>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>This section currently configures the UI and form fields. Runtime sensor switching will be added in the next step.</p>";
+
   html += "<h2>Night Mode</h2>";
   html += "<label>Night start time:</label>";
   html += "<div class='time-group'>";
@@ -103,6 +131,39 @@ String getConfigPage() {
   html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Time is synced automatically with every weather update.</p>";
 
   html += "<h2>Time Correction</h2>";
+  html += "<label>Timezone:</label>";
+  html += "<select name='timezoneMinutes' style='width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box;'>";
+  html += "<option value='-720' " + String(settings.timezoneMinutes == -720 ? "selected" : "") + ">UTC-12:00</option>";
+  html += "<option value='-660' " + String(settings.timezoneMinutes == -660 ? "selected" : "") + ">UTC-11:00</option>";
+  html += "<option value='-600' " + String(settings.timezoneMinutes == -600 ? "selected" : "") + ">UTC-10:00</option>";
+  html += "<option value='-540' " + String(settings.timezoneMinutes == -540 ? "selected" : "") + ">UTC-09:00</option>";
+  html += "<option value='-480' " + String(settings.timezoneMinutes == -480 ? "selected" : "") + ">UTC-08:00</option>";
+  html += "<option value='-420' " + String(settings.timezoneMinutes == -420 ? "selected" : "") + ">UTC-07:00</option>";
+  html += "<option value='-360' " + String(settings.timezoneMinutes == -360 ? "selected" : "") + ">UTC-06:00</option>";
+  html += "<option value='-300' " + String(settings.timezoneMinutes == -300 ? "selected" : "") + ">UTC-05:00</option>";
+  html += "<option value='-240' " + String(settings.timezoneMinutes == -240 ? "selected" : "") + ">UTC-04:00</option>";
+  html += "<option value='-180' " + String(settings.timezoneMinutes == -180 ? "selected" : "") + ">UTC-03:00</option>";
+  html += "<option value='-120' " + String(settings.timezoneMinutes == -120 ? "selected" : "") + ">UTC-02:00</option>";
+  html += "<option value='-60' " + String(settings.timezoneMinutes == -60 ? "selected" : "") + ">UTC-01:00</option>";
+  html += "<option value='0' " + String(settings.timezoneMinutes == 0 ? "selected" : "") + ">UTC+00:00</option>";
+  html += "<option value='60' " + String(settings.timezoneMinutes == 60 ? "selected" : "") + ">UTC+01:00</option>";
+  html += "<option value='120' " + String(settings.timezoneMinutes == 120 ? "selected" : "") + ">UTC+02:00</option>";
+  html += "<option value='180' " + String(settings.timezoneMinutes == 180 ? "selected" : "") + ">UTC+03:00 (Moscow)</option>";
+  html += "<option value='240' " + String(settings.timezoneMinutes == 240 ? "selected" : "") + ">UTC+04:00</option>";
+  html += "<option value='300' " + String(settings.timezoneMinutes == 300 ? "selected" : "") + ">UTC+05:00</option>";
+  html += "<option value='330' " + String(settings.timezoneMinutes == 330 ? "selected" : "") + ">UTC+05:30</option>";
+  html += "<option value='360' " + String(settings.timezoneMinutes == 360 ? "selected" : "") + ">UTC+06:00</option>";
+  html += "<option value='420' " + String(settings.timezoneMinutes == 420 ? "selected" : "") + ">UTC+07:00</option>";
+  html += "<option value='480' " + String(settings.timezoneMinutes == 480 ? "selected" : "") + ">UTC+08:00</option>";
+  html += "<option value='540' " + String(settings.timezoneMinutes == 540 ? "selected" : "") + ">UTC+09:00</option>";
+  html += "<option value='570' " + String(settings.timezoneMinutes == 570 ? "selected" : "") + ">UTC+09:30</option>";
+  html += "<option value='600' " + String(settings.timezoneMinutes == 600 ? "selected" : "") + ">UTC+10:00</option>";
+  html += "<option value='660' " + String(settings.timezoneMinutes == 660 ? "selected" : "") + ">UTC+11:00</option>";
+  html += "<option value='720' " + String(settings.timezoneMinutes == 720 ? "selected" : "") + ">UTC+12:00</option>";
+  html += "<option value='780' " + String(settings.timezoneMinutes == 780 ? "selected" : "") + ">UTC+13:00</option>";
+  html += "<option value='840' " + String(settings.timezoneMinutes == 840 ? "selected" : "") + ">UTC+14:00</option>";
+  html += "</select>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Default is UTC+03:00 (Moscow).</p>";
   html += "<label>Time correction (seconds per day):</label>";
   html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
@@ -131,6 +192,19 @@ String getConfigPage() {
 
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
   html += "</form>";
+
+  html += "<hr style='margin: 20px 0; border-color: #555;'>";
+  html += "<h2>Settings Backup</h2>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: 0;'>Export current settings to JSON and import them back after flashing.</p>";
+  html += "<form method='GET' action='/settings/export'>";
+  html += "<button type='submit' style='background: #607d8b;'>Export settings.json</button>";
+  html += "</form>";
+  html += "<form method='POST' action='/settings/import' style='margin-top: 12px;'>";
+  html += "<label>Import JSON:</label>";
+  html += "<textarea name='settingsJson' rows='10' style='width: 100%; box-sizing: border-box; padding: 10px; background: #333; color: #fff; border: 1px solid #555; border-radius: 5px;' placeholder='{...settings json...}'></textarea>";
+  html += "<button type='submit' style='background: #3f51b5; margin-top: 10px;'>Import settings and reboot</button>";
+  html += "</form>";
+
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
   html += "<form method='POST' action='/reset' style='margin-top: 20px;'>";
   html += "<button type='submit' style='background: #f44336;'>Reset Settings</button>";
@@ -140,8 +214,6 @@ String getConfigPage() {
   html += "<h2>Firmware OTA</h2>";
   html += "<p style='font-size: 12px; color: #ffb74d; margin-top: 0;'>Do not power off during update. Use only the .bin firmware file built for this board.</p>";
   html += "<form method='POST' action='/ota' enctype='multipart/form-data'>";
-  html += "<label>Confirm AP password:</label>";
-  html += "<input type='password' name='otaPassword' placeholder='AP password' required>";
   html += "<label>Firmware file (.bin):</label>";
   html += "<input type='file' name='firmware' accept='.bin,application/octet-stream' required>";
   html += "<button type='submit' style='background: #ff9800; margin-top: 10px;'>Update Firmware (OTA)</button>";
@@ -228,6 +300,12 @@ void handleSave() {
         settings.timeCorrectionPerDay = correction;
       }
     }
+    if (server.hasArg("timezoneMinutes")) {
+      int tz = server.arg("timezoneMinutes").toInt();
+      if (tz >= -720 && tz <= 840) {
+        settings.timezoneMinutes = (int16_t)tz;
+      }
+    }
 
     settings.syncDays = 1;
 
@@ -274,6 +352,12 @@ void handleSave() {
         settings.weatherScreenSeconds = sec;
       }
     }
+    if (server.hasArg("tempSensorType")) {
+      String sensorType = server.arg("tempSensorType");
+      sensorType.trim();
+      settings.tempSensorType = parseTempSensorType(sensorType);
+    }
+    settings.bmi160Enabled = server.hasArg("enableBmi160");
     settings.autoOtaEnabled = server.hasArg("autoOtaEnabled");
     if (server.hasArg("autoOtaCheckHours")) {
       int hours = server.arg("autoOtaCheckHours").toInt();
@@ -321,11 +405,6 @@ void handleOtaUpload() {
     otaUpdateStarted = true;
     otaUpdateSuccess = false;
     otaUpdateError = "";
-
-    if (!server.hasArg("otaPassword") || server.arg("otaPassword") != AP_PASSWORD) {
-      otaUpdateError = "Authentication failed";
-      return;
-    }
 
     String precheckReason;
     if (!otaPrecheck(precheckReason)) {
@@ -385,6 +464,46 @@ void handleOtaDone() {
   html += "<p>Rebooting into new firmware...</p></div></body></html>";
   server.send(200, "text/html", html);
   delay(1500);
+  ESP.restart();
+}
+
+void handleSettingsExport() {
+  String json;
+  if (!exportSettingsToJson(json)) {
+    server.send(500, "text/plain", "Failed to build settings JSON");
+    return;
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"settings.json\"");
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleSettingsImport() {
+  String json = server.arg("settingsJson");
+  if (json.length() == 0 && server.hasArg("plain")) {
+    json = server.arg("plain");
+  }
+  json.trim();
+  if (json.length() == 0) {
+    server.send(400, "text/plain", "settingsJson payload is empty");
+    return;
+  }
+
+  String error;
+  if (!importSettingsFromJson(json, error)) {
+    server.send(400, "text/plain", "Import failed: " + error);
+    return;
+  }
+
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Settings imported</title>";
+  html += "<style>body { font-family: Arial; text-align: center; margin-top: 50px; background: #1a1a1a; color: #fff; }";
+  html += ".message { background: #2a2a2a; padding: 20px; border-radius: 10px; max-width: 460px; margin: 0 auto; }";
+  html += "h1 { color: #4CAF50; }</style></head><body>";
+  html += "<div class='message'><h1>Settings imported</h1>";
+  html += "<p>Device will reboot now.</p></div></body></html>";
+  server.send(200, "text/html", html);
+  delay(1200);
   ESP.restart();
 }
 
@@ -451,6 +570,8 @@ void startConfigMode() {
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/settings/export", HTTP_GET, handleSettingsExport);
+  server.on("/settings/import", HTTP_POST, handleSettingsImport);
   server.on("/reset", HTTP_POST, handleReset);
   server.on("/ota", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.begin();

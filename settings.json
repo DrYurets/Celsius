@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "romVersion": "A1.1.7",
+  "wifi": {
+    "includeCredentials": false
+  },
+  "display": {
+    "showDebugCodes": false,
+    "showDate": true,
+    "showWeekday": true,
+    "timeFormat24h": true,
+    "hourlyBlink": true,
+    "weekdayLanguageRu": true,
+    "uiLanguage": "ru"
+  },
+  "nightMode": {
+    "startH": 23,
+    "startM": 0,
+    "endH": 7,
+    "endM": 0
+  },
+  "time": {
+    "timezoneMinutes": 180,
+    "timeCorrectionPerDay": 0,
+    "activeWeekdaysMask": 127
+  },
+  "sensors": {
+    "tempSensorType": "sht31",
+    "bmi160Enabled": true
+  },
+  "weather": {
+    "enabled": true,
+    "latitude": 53.92,
+    "longitude": 30.35,
+    "updateHours": 1,
+    "screenSeconds": 10
+  },
+  "autoOta": {
+    "enabled": true,
+    "checkHours": 24
+  }
+}
