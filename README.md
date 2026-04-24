@@ -24,6 +24,7 @@ Battery-powered ESP32-C3 clock with OLED, deep sleep, WiFi/NTP sync, outdoor wea
   - weather cache in RTC.
 - 5-page detailed weather screen by GPIO4 button (cached data only; no extra HTTP on button press).
 - Web setup mode (AP + admin page) with full device configuration.
+- Sensor thumbnails are served locally from embedded JPG assets (no Internet required).
 - OTA from setup page with safety prechecks.
 - AutoOTA check/update support (configurable, optional).
 - JSON export/import of settings from admin page (safe mode: no WiFi credentials in JSON).
@@ -48,7 +49,7 @@ Sensor logic is modular and stored under `sensors/`:
   - `AHT21`
   - `HTU21`
 - Motion wake source:
-  - `BMI160` enable/disable (checkbox in admin UI).
+  - `BMI160` enable/disable (checkbox in admin UI, default OFF).
 
 ## Web Admin (Setup Mode)
 
@@ -79,6 +80,7 @@ Device enters setup mode when WiFi config is missing, invalid, or initial setup 
 ### Endpoints
 
 - `GET /settings/export`
+- `POST /settings/export` (export current unsaved form values)
 - `POST /settings/import`
 
 ### Security policy
@@ -90,11 +92,22 @@ Device enters setup mode when WiFi config is missing, invalid, or initial setup 
 
 Root file `settings.json` contains baseline defaults for provisioning and mass setup.
 
+### Local image assets for setup mode
+
+- Sensor JPG files are embedded into firmware and served by the web server.
+- Expected paths:
+  - `/sensors/sht31/sht31.jpg`
+  - `/sensors/aht20bmp280/aht20bmp280.jpg`
+  - `/sensors/aht21/aht21.jpg`
+  - `/sensors/htu21/htu21.jpg`
+  - `/sensors/bmi160/bmi160.jpg`
+
 ## OTA
 
 ### Web OTA
 
 - Upload `Celsius.ino.bin` from setup page.
+- Filename must be exactly `Celsius.ino.bin`.
 - Prechecks:
   - setup mode only,
   - OTA partition available,

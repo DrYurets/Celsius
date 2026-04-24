@@ -35,7 +35,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.1.7"
+#define ROM_VERSION "A1.1.8"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -290,7 +290,7 @@ static DeviceSettings settings = {
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
   .tempSensorType = TEMP_SENSOR_SHT31,
-  .bmi160Enabled = true,
+  .bmi160Enabled = false,
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
   .activeWeekdaysMask = WEEKDAY_MASK_ALL
@@ -532,7 +532,7 @@ void loadSettings() {
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
     settings.tempSensorType = TEMP_SENSOR_SHT31;
-    settings.bmi160Enabled = true;
+    settings.bmi160Enabled = false;
     settings.autoOtaEnabled = true;
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;

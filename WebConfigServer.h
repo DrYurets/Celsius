@@ -2,6 +2,11 @@
 #define WEB_CONFIG_SERVER_H
 
 #include "sensors/SensorTypes.h"
+#include "sensors/sht31/SHT31Image.h"
+#include "sensors/aht20bmp280/AHT20BMP280Image.h"
+#include "sensors/aht21/AHT21Image.h"
+#include "sensors/htu21/HTU21Image.h"
+#include "sensors/bmi160/BMI160Image.h"
 
 static bool otaPrecheck(String &reason) {
   if (!configMode) {
@@ -36,6 +41,7 @@ void handleOtaUpload();
 void handleOtaDone();
 void handleSettingsExport();
 void handleSettingsImport();
+void handleSensorImage();
 
 String getConfigPage() {
   uint8_t weekdaysMask = settings.activeWeekdaysMask & WEEKDAY_MASK_ALL;
@@ -92,11 +98,11 @@ String getConfigPage() {
   html += "<h2>Device Configuration</h2>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Select the installed sensors. Temperature sensor can be only one.</p>";
   html += "<div class='sensor-gallery'>";
-  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/sht31/sht31.jpg' alt='SHT31'><div class='name'>SHT31</div></div>";
-  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/aht20bmp280/aht20bmp280.jpg' alt='AHT20+BMP280'><div class='name'>AHT20+BMP280</div></div>";
-  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/aht21/aht21.jpg' alt='AHT21'><div class='name'>AHT21</div></div>";
-  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/htu21/htu21.jpg' alt='HTU21'><div class='name'>HTU21</div></div>";
-  html += "<div class='sensor-card'><img src='https://raw.githubusercontent.com/DrYurets/Celsius/128x64/sensors/bmi160/bmi160.jpg' alt='BMI160'><div class='name'>BMI160 (Gyro/Motion)</div></div>";
+  html += "<div class='sensor-card'><img src='/sensors/sht31/sht31.jpg' alt='SHT31'><div class='name'>SHT31</div></div>";
+  html += "<div class='sensor-card'><img src='/sensors/aht20bmp280/aht20bmp280.jpg' alt='AHT20+BMP280'><div class='name'>AHT20+BMP280</div></div>";
+  html += "<div class='sensor-card'><img src='/sensors/aht21/aht21.jpg' alt='AHT21'><div class='name'>AHT21</div></div>";
+  html += "<div class='sensor-card'><img src='/sensors/htu21/htu21.jpg' alt='HTU21'><div class='name'>HTU21</div></div>";
+  html += "<div class='sensor-card'><img src='/sensors/bmi160/bmi160.jpg' alt='BMI160'><div class='name'>BMI160 (Gyro/Motion)</div></div>";
   html += "</div>";
   html += "<label>Temperature/Humidity sensor:</label>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='sht31' " + String(strcmp(selectedTempSensor, "sht31") == 0 ? "checked" : "") + "><label>SHT31</label></div>";
@@ -104,7 +110,7 @@ String getConfigPage() {
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht21' " + String(strcmp(selectedTempSensor, "aht21") == 0 ? "checked" : "") + "><label>AHT21</label></div>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='htu21' " + String(strcmp(selectedTempSensor, "htu21") == 0 ? "checked" : "") + "><label>HTU21</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='enableBmi160' " + String(settings.bmi160Enabled ? "checked" : "") + "><label>Enable BMI160 motion sensor</label></div>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>This section currently configures the UI and form fields. Runtime sensor switching will be added in the next step.</p>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Sensor selection is active in runtime and saved to EEPROM.</p>";
 
   html += "<h2>Night Mode</h2>";
   html += "<label>Night start time:</label>";
@@ -191,14 +197,13 @@ String getConfigPage() {
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Checks run only in normal daytime cycle with valid time and sufficient battery.</p>";
 
   html += "<button type='submit' style='margin-top: 20px;'>Save and Reset</button>";
+  html += "<button type='submit' formaction='/settings/export' formmethod='POST' style='background: #607d8b; margin-top: 10px;'>Export current form as JSON</button>";
   html += "</form>";
 
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
   html += "<h2>Settings Backup</h2>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: 0;'>Export current settings to JSON and import them back after flashing.</p>";
-  html += "<form method='GET' action='/settings/export'>";
-  html += "<button type='submit' style='background: #607d8b;'>Export settings.json</button>";
-  html += "</form>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: 0;'>Use the export button above to export exactly what is currently entered in the form.</p>";
   html += "<form method='POST' action='/settings/import' style='margin-top: 12px;'>";
   html += "<label>Import JSON:</label>";
   html += "<textarea name='settingsJson' rows='10' style='width: 100%; box-sizing: border-box; padding: 10px; background: #333; color: #fff; border: 1px solid #555; border-radius: 5px;' placeholder='{...settings json...}'></textarea>";
@@ -212,13 +217,22 @@ String getConfigPage() {
 
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
   html += "<h2>Firmware OTA</h2>";
-  html += "<p style='font-size: 12px; color: #ffb74d; margin-top: 0;'>Do not power off during update. Use only the .bin firmware file built for this board.</p>";
+  html += "<p style='font-size: 12px; color: #ffb74d; margin-top: 0;'>Do not power off during update. The firmware filename must be exactly <b>Celsius.ino.bin</b>.</p>";
   html += "<form method='POST' action='/ota' enctype='multipart/form-data'>";
   html += "<label>Firmware file (.bin):</label>";
-  html += "<input type='file' name='firmware' accept='.bin,application/octet-stream' required>";
+  html += "<input type='file' id='firmwareFile' name='firmware' accept='.bin,application/octet-stream' required>";
   html += "<button type='submit' style='background: #ff9800; margin-top: 10px;'>Update Firmware (OTA)</button>";
   html += "</form>";
   html += otaStatusHtml();
+
+  html += "<script>";
+  html += "const fw=document.getElementById('firmwareFile');";
+  html += "if(fw){fw.addEventListener('change',()=>{";
+  html += "if(!fw.files||!fw.files.length)return;";
+  html += "const n=fw.files[0].name;";
+  html += "if(n!=='Celsius.ino.bin'){alert('Firmware file must be named Celsius.ino.bin');fw.value='';}";
+  html += "});}";
+  html += "</script>";
 
   html += "</div></body></html>";
   return html;
@@ -406,6 +420,11 @@ void handleOtaUpload() {
     otaUpdateSuccess = false;
     otaUpdateError = "";
 
+    if (upload.filename != "Celsius.ino.bin") {
+      otaUpdateError = "Invalid filename. Use Celsius.ino.bin";
+      return;
+    }
+
     String precheckReason;
     if (!otaPrecheck(precheckReason)) {
       otaUpdateError = precheckReason;
@@ -468,6 +487,64 @@ void handleOtaDone() {
 }
 
 void handleSettingsExport() {
+  if (server.method() == HTTP_POST) {
+    DeviceSettings preview = settings;
+    if (server.hasArg("showDebugCodes")) preview.showDebugCodes = true; else preview.showDebugCodes = false;
+    if (server.hasArg("showDate")) preview.showDate = true; else preview.showDate = false;
+    if (server.hasArg("showWeekday")) preview.showWeekday = true; else preview.showWeekday = false;
+    if (server.hasArg("timeFormat24h")) preview.timeFormat24h = true; else preview.timeFormat24h = false;
+    if (server.hasArg("hourlyBlink")) preview.hourlyBlink = true; else preview.hourlyBlink = false;
+    if (server.hasArg("weekdayLanguageRu")) preview.weekdayLanguageRu = true; else preview.weekdayLanguageRu = false;
+    if (server.hasArg("uiLanguage")) {
+      String lang = server.arg("uiLanguage");
+      lang.trim();
+      preview.uiLanguage = (lang == "en") ? UI_LANG_EN : UI_LANG_RU;
+    }
+    if (server.hasArg("nightStartH")) preview.nightStartH = (uint8_t)server.arg("nightStartH").toInt();
+    if (server.hasArg("nightStartM")) preview.nightStartM = (uint8_t)server.arg("nightStartM").toInt();
+    if (server.hasArg("nightEndH")) preview.nightEndH = (uint8_t)server.arg("nightEndH").toInt();
+    if (server.hasArg("nightEndM")) preview.nightEndM = (uint8_t)server.arg("nightEndM").toInt();
+    if (server.hasArg("timeCorrectionPerDay")) preview.timeCorrectionPerDay = server.arg("timeCorrectionPerDay").toInt();
+    if (server.hasArg("timezoneMinutes")) preview.timezoneMinutes = (int16_t)server.arg("timezoneMinutes").toInt();
+    if (server.hasArg("wdMon") || server.hasArg("wdTue") || server.hasArg("wdWed") || server.hasArg("wdThu") || server.hasArg("wdFri") || server.hasArg("wdSat") || server.hasArg("wdSun")) {
+      uint8_t mask = 0;
+      if (server.hasArg("wdMon")) mask |= (1U << 0);
+      if (server.hasArg("wdTue")) mask |= (1U << 1);
+      if (server.hasArg("wdWed")) mask |= (1U << 2);
+      if (server.hasArg("wdThu")) mask |= (1U << 3);
+      if (server.hasArg("wdFri")) mask |= (1U << 4);
+      if (server.hasArg("wdSat")) mask |= (1U << 5);
+      if (server.hasArg("wdSun")) mask |= (1U << 6);
+      preview.activeWeekdaysMask = (mask == 0) ? WEEKDAY_MASK_ALL : mask;
+    }
+    if (server.hasArg("weatherLatitude")) preview.weatherLatitude = server.arg("weatherLatitude").toFloat();
+    if (server.hasArg("weatherLongitude")) preview.weatherLongitude = server.arg("weatherLongitude").toFloat();
+    if (server.hasArg("weatherUpdateHours")) preview.weatherUpdateHours = (uint8_t)server.arg("weatherUpdateHours").toInt();
+    if (server.hasArg("weatherScreenSeconds")) preview.weatherScreenSeconds = (uint8_t)server.arg("weatherScreenSeconds").toInt();
+    if (server.hasArg("tempSensorType")) {
+      String sensorType = server.arg("tempSensorType");
+      sensorType.trim();
+      preview.tempSensorType = parseTempSensorType(sensorType);
+    }
+    preview.bmi160Enabled = server.hasArg("enableBmi160");
+    preview.autoOtaEnabled = server.hasArg("autoOtaEnabled");
+    if (server.hasArg("autoOtaCheckHours")) preview.autoOtaCheckHours = (uint16_t)server.arg("autoOtaCheckHours").toInt();
+
+    DeviceSettings saved = settings;
+    settings = preview;
+    rebuildOpenMeteoUrlFromCoordinates();
+    String json;
+    bool ok = exportSettingsToJson(json);
+    settings = saved;
+    if (!ok) {
+      server.send(500, "text/plain", "Failed to build settings JSON");
+      return;
+    }
+    server.sendHeader("Content-Disposition", "attachment; filename=\"settings.json\"");
+    server.send(200, "application/json; charset=utf-8", json);
+    return;
+  }
+
   String json;
   if (!exportSettingsToJson(json)) {
     server.send(500, "text/plain", "Failed to build settings JSON");
@@ -505,6 +582,34 @@ void handleSettingsImport() {
   server.send(200, "text/html", html);
   delay(1200);
   ESP.restart();
+}
+
+void handleSensorImage() {
+  String uri = server.uri();
+  const uint8_t *data = nullptr;
+  size_t len = 0;
+
+  if (uri == "/sensors/sht31/sht31.jpg") {
+    data = sensors_sht31_sht31_jpg;
+    len = sensors_sht31_sht31_jpg_len;
+  } else if (uri == "/sensors/aht20bmp280/aht20bmp280.jpg") {
+    data = sensors_aht20bmp280_aht20bmp280_jpg;
+    len = sensors_aht20bmp280_aht20bmp280_jpg_len;
+  } else if (uri == "/sensors/aht21/aht21.jpg") {
+    data = sensors_aht21_aht21_jpg;
+    len = sensors_aht21_aht21_jpg_len;
+  } else if (uri == "/sensors/htu21/htu21.jpg") {
+    data = sensors_htu21_htu21_jpg;
+    len = sensors_htu21_htu21_jpg_len;
+  } else if (uri == "/sensors/bmi160/bmi160.jpg") {
+    data = sensors_bmi160_bmi160_jpg;
+    len = sensors_bmi160_bmi160_jpg_len;
+  } else {
+    server.send(404, "text/plain", "Image not found");
+    return;
+  }
+
+  server.send_P(200, "image/jpeg", (PGM_P)data, len);
 }
 
 void updateConfigModeDisplay() {
@@ -570,7 +675,13 @@ void startConfigMode() {
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/sensors/sht31/sht31.jpg", HTTP_GET, handleSensorImage);
+  server.on("/sensors/aht20bmp280/aht20bmp280.jpg", HTTP_GET, handleSensorImage);
+  server.on("/sensors/aht21/aht21.jpg", HTTP_GET, handleSensorImage);
+  server.on("/sensors/htu21/htu21.jpg", HTTP_GET, handleSensorImage);
+  server.on("/sensors/bmi160/bmi160.jpg", HTTP_GET, handleSensorImage);
   server.on("/settings/export", HTTP_GET, handleSettingsExport);
+  server.on("/settings/export", HTTP_POST, handleSettingsExport);
   server.on("/settings/import", HTTP_POST, handleSettingsImport);
   server.on("/reset", HTTP_POST, handleReset);
   server.on("/ota", HTTP_POST, handleOtaDone, handleOtaUpload);
