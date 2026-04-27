@@ -1,7 +1,7 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.1.8",
+  "version": "A1.2.9",
   "notes": "Initial AutoOTA manifest for Celsius",
   "builds": [
     {

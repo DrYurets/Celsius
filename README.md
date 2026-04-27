@@ -22,7 +22,7 @@ Battery-powered ESP32-C3 clock with OLED, deep sleep, WiFi/NTP sync, outdoor wea
   - update interval 1..24h,
   - WiFi on-demand only,
   - weather cache in RTC.
-- 5-page detailed weather screen by GPIO4 button (cached data only; no extra HTTP on button press).
+- 7-page detailed weather screen by GPIO4 button (cached data only; no extra HTTP on button press).
 - Web setup mode (AP + admin page) with full device configuration.
 - Sensor thumbnails are served locally from embedded JPG assets (no Internet required).
 - OTA from setup page with safety prechecks.
@@ -135,12 +135,14 @@ Root file `settings.json` contains baseline defaults for provisioning and mass s
 - Top row: weekday/date + battery icon.
 - Main area: large time.
 - Bottom row: outdoor + indoor values.
-- Detailed weather by GPIO4: 5 screens from cached RTC weather data:
+- Detailed weather by GPIO4: 7 screens from cached RTC weather data:
   1. Current outdoor temperature + feels-like
   2. Wind speed + direction
   3. Humidity + pressure
   4. Current icon + precipitation + nearest night minimum
-  5. Forecast for tomorrow + next 2 days
+  5. Forecast for tomorrow (large icon)
+  6. Forecast for day +2 (large icon)
+  7. Forecast for day +3 (large icon)
 
 ## Build/Dependencies
 

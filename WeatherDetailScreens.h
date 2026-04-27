@@ -6,7 +6,7 @@
 #include "Meteocons.h"
 
 /** Количество страниц подробной погоды (GPIO4). */
-constexpr uint8_t kWeatherDetailScreenCount = 5;
+constexpr uint8_t kWeatherDetailScreenCount = 7;
 
 /** 16-румбовая роза; deg — метеорологические градусы (0 = север, по часовой). */
 inline const char *windDirectionLabel16Ru(float deg) {
@@ -104,32 +104,34 @@ inline const char *weekdayShortRuByTmWday(uint8_t wday) {
 }
 
 template <typename DisplayT>
-inline void drawWeatherIcon(DisplayT &display, int16_t x, int16_t y, int16_t size, int32_t wmoCode) {
-  const uint8_t *bmp = meteoconByWmo(wmoCode);
-  if (size < 1) size = 1;
-  // Рисуем bitmap вручную, чтобы избежать искажений от разных форматов drawBitmap в драйверах.
-  for (int yy = 0; yy < 16; ++yy) {
-    uint8_t b0 = bmp[yy * 2 + 0];
-    uint8_t b1 = bmp[yy * 2 + 1];
-    for (int xx = 0; xx < 16; ++xx) {
-      bool on = (xx < 8) ? (b0 & (0x80 >> xx)) : (b1 & (0x80 >> (xx - 8)));
+inline void drawWeatherIcon(DisplayT &display,
+                            int16_t x,
+                            int16_t y,
+                            int16_t pixelScale,
+                            int32_t wmoCode,
+                            float windSpeedMs = NAN,
+                            bool night = false) {
+  MeteoconGlyph glyph = meteoconByWmoAndWind(wmoCode, windSpeedMs, night);
+  if (pixelScale < 1) pixelScale = 1;
+  const uint8_t rowBytes = (uint8_t)((glyph.width + 7) / 8);
+  // Рисуем bitmap вручную с целочисленным масштабом,
+  // чтобы сохранить "пиксельную" чёткость без дробных искажений.
+  for (int yy = 0; yy < glyph.height; ++yy) {
+    const uint8_t *row = glyph.rows + (yy * rowBytes);
+    for (int xx = 0; xx < glyph.width; ++xx) {
+      uint8_t b = row[xx / 8];
+      bool on = (b & (0x80 >> (xx % 8))) != 0;
       if (!on) continue;
-      int16_t px = x + (int16_t)((xx * size) / 16);
-      int16_t py = y + (int16_t)((yy * size) / 16);
-      int16_t nx = x + (int16_t)(((xx + 1) * size) / 16);
-      int16_t ny = y + (int16_t)(((yy + 1) * size) / 16);
-      int16_t w = nx - px;
-      int16_t h = ny - py;
-      if (w < 1) w = 1;
-      if (h < 1) h = 1;
-      display.fillRect(px, py, w, h, 1);
+      int16_t px = x + (int16_t)(xx * pixelScale);
+      int16_t py = y + (int16_t)(yy * pixelScale);
+      display.fillRect(px, py, pixelScale, pixelScale, 1);
     }
   }
 }
 
 /**
  * Одна страница подробной погоды (128×64, альбомная ориентация).
- * screenIndex: 0..4.
+ * screenIndex: 0..6.
  */
 template <typename DisplayT>
 inline void drawWeatherDetailScreen(DisplayT &display,
@@ -285,7 +287,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
     case 3: {
       display.setCursor(0, 0);
       display.print("Текущая погода");
-      drawWeatherIcon(display, 6, 14, 28, currentWmoCode);
+      drawWeatherIcon(display, 2, 10, 1, currentWmoCode, windSpeedMs, false); // 21x22 glyph
       display.setCursor(42, 15);
       display.print("Осадки: ");
       if (isnan(precipProbabilityPct)) {
@@ -314,48 +316,52 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print("С");
         nightIconX = xAfter + 16;
       }
-      drawWeatherIcon(display, nightIconX, 44, 16, nightWmo);
+      drawWeatherIcon(display, nightIconX, 40, 1, nightWmo, NAN, true); // night glyph
       break;
     }
     case 4:
+    case 5:
     default: {
-      const int16_t colX[3] = { 0, 43, 86 };
-      for (uint8_t i = 0; i < 3; ++i) {
-        int16_t x = colX[i];
-        uint8_t srcIdx = (uint8_t)(i + 1); // прогноз именно на 3 дня вперед: завтра, послезавтра, +3
-        uint8_t wd = (uint8_t)((baseTmWday + srcIdx) % 7);
-        display.setCursor(x + 7, 0);
-        display.print(weekdayShortRuByTmWday(wd));
+      uint8_t srcIdx = (uint8_t)(screenIndex - 3); // 1..3 => завтра, послезавтра, +3 день
+      uint8_t wd = (uint8_t)((baseTmWday + srcIdx) % 7);
 
-        int32_t code = dailyWmoCode ? dailyWmoCode[srcIdx] : -1;
-        drawWeatherIcon(display, x + 4, 7, 22, code);
+      display.setCursor(0, 0);
+      display.print("Прогноз: ");
+      display.print(weekdayShortRuByTmWday(wd));
 
-        display.setCursor(x, 30);
-        char dayBuf[8];
-        formatSignedIntTemp(dayBuf, sizeof(dayBuf), (dailyTempMaxC ? dailyTempMaxC[srcIdx] : NAN));
-        display.print(dayBuf);
-        display.print("/");
-        char nightBuf[8];
-        formatSignedIntTemp(nightBuf, sizeof(nightBuf), (dailyTempMinC ? dailyTempMinC[srcIdx] : NAN));
-        display.print(nightBuf);
-        // Без символа градуса в 5-м экране: так строка гарантированно помещается в колонку.
+      int32_t code = dailyWmoCode ? dailyWmoCode[srcIdx] : -1;
+      float dayWind = dailyWindDayMs ? dailyWindDayMs[srcIdx] : NAN;
+      float dayPrecip = dailyPrecipDayPct ? dailyPrecipDayPct[srcIdx] : NAN;
+      drawWeatherIcon(display, 0, 12, 1, code, dayWind, false); // Meteocons glyph
 
-        display.setCursor(x + 3, 41);
-        if (isnan(dailyWindDayMs ? dailyWindDayMs[srcIdx] : NAN)) {
-          display.print("--");
-        } else {
-          char wbuf[8];
-          snprintf(wbuf, sizeof(wbuf), "%.1f", dailyWindDayMs[srcIdx]);
-          display.print(wbuf);
-        }
+      char dayBuf[8];
+      char nightBuf[8];
+      formatSignedIntTemp(dayBuf, sizeof(dayBuf), (dailyTempMaxC ? dailyTempMaxC[srcIdx] : NAN));
+      formatSignedIntTemp(nightBuf, sizeof(nightBuf), (dailyTempMinC ? dailyTempMinC[srcIdx] : NAN));
 
-        display.setCursor(x + 3, 52);
-        if (isnan(dailyPrecipDayPct ? dailyPrecipDayPct[srcIdx] : NAN)) {
-          display.print("--%");
-        } else {
-          display.print((int)lroundf(dailyPrecipDayPct[srcIdx]));
-          display.print("%");
-        }
+      display.setCursor(40, 16);
+      display.print("День/ночь");
+      display.setCursor(40, 28);
+      display.print(dayBuf);
+      display.print("/");
+      display.print(nightBuf);
+
+      display.setCursor(40, 42);
+      display.print("Ветер: ");
+      if (isnan(dayWind)) display.print("--");
+      else {
+        char wbuf[8];
+        snprintf(wbuf, sizeof(wbuf), "%.1f", dayWind);
+        display.print(wbuf);
+      }
+      display.print("м/с");
+
+      display.setCursor(40, 54);
+      display.print("Осадки: ");
+      if (isnan(dayPrecip)) display.print("--%");
+      else {
+        display.print((int)lroundf(dayPrecip));
+        display.print("%");
       }
       break;
     }
