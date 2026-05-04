@@ -217,22 +217,24 @@ inline void drawWeatherDetailScreen(DisplayT &display,
           snprintf(dirLabel, sizeof(dirLabel), "--");
           degBuf[0] = '\0';
         }
-        display.setCursor(0, 44);
+        constexpr int16_t kWindDirTextY = 42;
+        display.setTextSize(2);
+        display.setCursor(0, kWindDirTextY);
         display.print(dirLabel);
         if (!isnan(windDirDeg)) {
           display.print(" ");
           display.print(degBuf);
         }
         if (!isnan(windDirDeg)) {
-          int16_t glyphs = (int16_t)utf8GlyphCount(dirLabel) + 1 + (int16_t)strlen(degBuf);
-          int16_t xAfter = glyphs * 6;
-          drawDegreeMark(display, xAfter + 1, 44);
+          const int16_t chW = 12;  // как у остальных крупных цифр на экране (setTextSize(2))
+          int16_t xAfter = (int16_t)utf8GlyphCount(dirLabel) * chW + chW + (int16_t)strlen(degBuf) * chW;
+          drawDegreeMark(display, xAfter + 1, kWindDirTextY + 2);
         }
       }
 
       if (!isnan(windDirDeg)) {
         const int16_t cx = 102;
-        const int16_t cy = 12;
+        const int16_t cy = 22;  // было 12: опустить стрелку на 10 px
         const float rad = windDirDeg * 0.0174532925f;
         const float vx = -sinf(rad);
         const float vy = cosf(rad);
@@ -287,7 +289,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
     case 3: {
       display.setCursor(0, 0);
       display.print("Текущая погода");
-      drawWeatherIcon(display, 2, 10, 1, currentWmoCode, windSpeedMs, false); // 21x22 glyph
+      drawWeatherIcon(display, 7, 10, 1, currentWmoCode, windSpeedMs, false); // стр. 4: +5 px вправо
       display.setCursor(42, 15);
       display.print("Осадки: ");
       if (isnan(precipProbabilityPct)) {
@@ -332,7 +334,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       int32_t code = dailyWmoCode ? dailyWmoCode[srcIdx] : -1;
       float dayWind = dailyWindDayMs ? dailyWindDayMs[srcIdx] : NAN;
       float dayPrecip = dailyPrecipDayPct ? dailyPrecipDayPct[srcIdx] : NAN;
-      drawWeatherIcon(display, 0, 12, 1, code, dayWind, false); // Meteocons glyph
+      drawWeatherIcon(display, 5, 12, 1, code, dayWind, false); // Meteocons glyph (+5 к X)
 
       char dayBuf[8];
       char nightBuf[8];
@@ -346,7 +348,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.print("/");
       display.print(nightBuf);
 
-      display.setCursor(40, 42);
+      display.setCursor(40, 40);
       display.print("Ветер: ");
       if (isnan(dayWind)) display.print("--");
       else {
@@ -356,7 +358,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       }
       display.print("м/с");
 
-      display.setCursor(40, 54);
+      display.setCursor(40, 56);
       display.print("Осадки: ");
       if (isnan(dayPrecip)) display.print("--%");
       else {
