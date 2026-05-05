@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.3"
+#define ROM_VERSION "A1.4.4"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -465,19 +465,66 @@ static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
 static void showOtaUpdateInfoScreen() {
   const char *msg = otaAvailableMessage[0] ? otaAvailableMessage : "(no details)";
   const size_t msgLen = strnlen(msg, sizeof(otaAvailableMessage) - 1);
-  const size_t firstPageChars = 22U * 3U;  // 3 строки текста после версии/даты
-  const size_t nextPageChars = 22U * 6U;   // со 2-й страницы только текст: 6 строк
+
+  // UTF-8 safe wrap: режем по числу глифов, а не по байтам.
+  constexpr uint8_t kGlyphsPerLine = 21;  // 21*6px = 126px, почти вся ширина 128px
+  constexpr uint8_t kMaxWrappedLines = 32;
+  char wrapped[kMaxWrappedLines][48];
+  uint8_t wrappedCount = 0;
+  {
+    size_t i = 0;
+    uint8_t lineGlyphs = 0;
+    uint8_t lineBytes = 0;
+    auto flushLine = [&]() {
+      if (wrappedCount >= kMaxWrappedLines) return;
+      wrapped[wrappedCount][lineBytes] = '\0';
+      wrappedCount++;
+      lineGlyphs = 0;
+      lineBytes = 0;
+    };
+
+    while (i < msgLen && wrappedCount < kMaxWrappedLines) {
+      uint8_t c = (uint8_t)msg[i];
+      size_t chLen = 1;
+      if ((c & 0x80) == 0x00) chLen = 1;
+      else if ((c & 0xE0) == 0xC0) chLen = 2;
+      else if ((c & 0xF0) == 0xE0) chLen = 3;
+      else if ((c & 0xF8) == 0xF0) chLen = 4;
+      if (i + chLen > msgLen) chLen = 1;
+
+      if (lineGlyphs >= kGlyphsPerLine || (lineBytes + chLen + 1U) >= sizeof(wrapped[0])) {
+        flushLine();
+        if (wrappedCount >= kMaxWrappedLines) break;
+      }
+
+      for (size_t j = 0; j < chLen; j++) {
+        wrapped[wrappedCount][lineBytes++] = msg[i + j];
+      }
+      lineGlyphs++;
+      i += chLen;
+    }
+    if (lineBytes > 0 && wrappedCount < kMaxWrappedLines) {
+      flushLine();
+    }
+    if (wrappedCount == 0) {
+      strlcpy(wrapped[0], "(no details)", sizeof(wrapped[0]));
+      wrappedCount = 1;
+    }
+  }
+
+  const uint8_t firstPageLines = 3;
+  const uint8_t nextPageLines = 6;
   uint8_t totalPages = 1;
-  if (msgLen > firstPageChars) {
-    const size_t rem = msgLen - firstPageChars;
-    totalPages = (uint8_t)(1U + (rem + nextPageChars - 1U) / nextPageChars);
+  if (wrappedCount > firstPageLines) {
+    uint8_t rem = (uint8_t)(wrappedCount - firstPageLines);
+    totalPages = (uint8_t)(1U + (rem + nextPageLines - 1U) / nextPageLines);
   }
   uint8_t page = 0;
   bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
   uint32_t lastActionMs = millis();
 
   auto drawPage = [&](uint8_t pageIdx) {
-    size_t base = 0;
+    uint8_t lineFrom = 0;
     uint8_t rowCount = 0;
     int16_t textY0 = 0;
     applyDisplayOrientation();
@@ -492,27 +539,22 @@ static void showOtaUpdateInfoScreen() {
       display.setCursor(0, 10);
       display.print("Date: ");
       display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
-      base = 0;
-      rowCount = 3;
+      lineFrom = 0;
+      rowCount = firstPageLines;
       textY0 = 30;
     } else {
-      base = firstPageChars + (size_t)(pageIdx - 1U) * nextPageChars;
-      rowCount = 6;
+      lineFrom = (uint8_t)(firstPageLines + (pageIdx - 1U) * nextPageLines);
+      rowCount = nextPageLines;
       textY0 = 0;
     }
 
-    char line[23];
     for (uint8_t row = 0; row < rowCount; row++) {
-      size_t from = base + (size_t)row * 22U;
-      if (from >= msgLen) {
+      uint8_t lineIdx = (uint8_t)(lineFrom + row);
+      if (lineIdx >= wrappedCount) {
         break;
       }
-      size_t n = msgLen - from;
-      if (n > 22U) n = 22U;
-      memcpy(line, msg + from, n);
-      line[n] = '\0';
       display.setCursor(0, textY0 + row * 10);
-      display.println(line);
+      display.println(wrapped[lineIdx]);
     }
     display.display();
   };
