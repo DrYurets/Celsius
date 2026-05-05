@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.4"
+#define ROM_VERSION "A1.4.5"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -581,20 +581,25 @@ static bool ensureWiFiConnectedForOta() {
   if (WiFi.status() == WL_CONNECTED) {
     return true;
   }
+  // Повторяем схему подключения как в ntpSync(), она на устройстве уже проверена.
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(80);
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.begin(wifiSSID, wifiPassword, 15);
   uint32_t startMs = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 15000UL) {
-    delay(200);
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 30000UL) {
+    delay(250);
   }
   return WiFi.status() == WL_CONNECTED;
 }
 
 static bool runManualOtaInstall() {
   const uint32_t t0 = millis();
+  setCpuPerformance();
   applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
@@ -613,8 +618,20 @@ static bool runManualOtaInstall() {
     display.display();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    setCpuLowPower();
     return false;
   }
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("OTA install...");
+  display.setCursor(0, 12);
+  display.println("Check update");
+  char tbuf0[20];
+  snprintf(tbuf0, sizeof(tbuf0), "t=%lus", (unsigned long)((millis() - t0) / 1000UL));
+  display.setCursor(0, 24);
+  display.println(tbuf0);
+  display.display();
 
   String newVersion;
   String notes;
@@ -631,6 +648,7 @@ static bool runManualOtaInstall() {
     otaAvailableMessage[0] = '\0';
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    setCpuLowPower();
     return false;
   }
 
@@ -658,6 +676,7 @@ static bool runManualOtaInstall() {
     display.display();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    setCpuLowPower();
     return false;
   }
 
@@ -671,6 +690,7 @@ static bool runManualOtaInstall() {
   delay(1200);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  setCpuLowPower();
   return true;
 }
 
