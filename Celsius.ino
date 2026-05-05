@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.1"
+#define ROM_VERSION "A1.4.2"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -1265,7 +1265,7 @@ void drawBattery(uint8_t bars) {
 
 static void drawOtaAvailableIcon() {
   // Небольшая иконка "обновление доступно": коробка + стрелка вниз.
-  const int16_t x = 95;
+  const int16_t x = 90;
   const int16_t y = 1;
   display.drawRect(x, y + 4, 10, 6, SSD1306_WHITE);
   display.fillRect(x + 4, y, 2, 5, SSD1306_WHITE);
