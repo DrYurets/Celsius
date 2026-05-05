@@ -109,7 +109,7 @@ String getConfigPage() {
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht20bmp280' " + String(strcmp(selectedTempSensor, "aht20bmp280") == 0 ? "checked" : "") + "><label>AHT20 + BMP280</label></div>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht21' " + String(strcmp(selectedTempSensor, "aht21") == 0 ? "checked" : "") + "><label>AHT21</label></div>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='htu21' " + String(strcmp(selectedTempSensor, "htu21") == 0 ? "checked" : "") + "><label>HTU21</label></div>";
-  html += "<div class='checkbox-label'><input type='checkbox' name='enableBmi160' " + String(settings.bmi160Enabled ? "checked" : "") + "><label>Enable BMI160 motion sensor</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='enableBmi160' " + String(settings.bmi160Enabled ? "checked" : "") + "><label>Enable BMI160 (auto screen flip when upside down)</label></div>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Sensor selection is active in runtime and saved to EEPROM.</p>";
 
   html += "<h2>Night Mode</h2>";
@@ -613,6 +613,7 @@ void handleSensorImage() {
 }
 
 void updateConfigModeDisplay() {
+  applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(12, 0);

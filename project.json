@@ -1,8 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.2.9",
-  "notes": "Initial AutoOTA manifest for Celsius",
+  "version": "A1.4.0",
+  "releaseDate": "2026-05-05",
+  "whatsNew": "Reworked OTA update flow: the clock now detects new firmware, shows an update icon, and opens firmware details from GPIO4. Added manual confirmation with hold-to-install, a countdown/progress bar, and install status screens.",
+  "notes": "Implemented a full OTA discovery and manual install UX with update indicator, details screen, and hold-to-confirm install flow.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",

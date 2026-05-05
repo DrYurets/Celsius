@@ -2,7 +2,7 @@
 * Celsius Clock (ESP32-C3)
 * https://github.com/DrYurets/Celsius/tree/aht20bmp280
 * 
-* Date: 22.04.2026
+* Date: 05.05.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -26,6 +26,7 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <AutoOTA.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "sensors/bmi160/BMI160Motion.h"
 #include "sensors/SensorTypes.h"
@@ -35,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.2.9"
+#define ROM_VERSION "A1.4.0"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -54,6 +55,7 @@
 #define LED_PIN 0
 #define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
+#define OTA_BUTTON_PIN WEATHER_BUTTON_PIN
 #define BMI160_INT1_PIN 5
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
@@ -87,6 +89,27 @@
 #define AUTOOTA_CHECK_INTERVAL_HOURS_MIN 1
 #define AUTOOTA_CHECK_INTERVAL_HOURS_MAX 168
 #define AUTOOTA_MIN_BATTERY_V 3.20f
+
+// 1 = раз в runCycle печать в Serial по BMI160 (ось, порог); выключите после проверки.
+#ifndef BMI160_ORIENT_DIAG_SERIAL
+#define BMI160_ORIENT_DIAG_SERIAL 1
+#endif
+
+#ifndef BMI160_ORIENT_INVERT
+#define BMI160_ORIENT_INVERT 1
+#endif
+
+// Ось BMI160, по **знаку** которой определяется переворот OLED (зависит от того, как чип припаян к плате):
+// 0=X, 1=Y, 2=Z. Раньше бралась «доминирующая» ось (max |ax|,|ay|,|az|) — при креплении, когда |Z|>|Y|,
+// переворот корпуса менял знак у Y, а алгоритм смотрел на Z и не реагировал как ожидалось.
+#ifndef BMI160_ORIENT_AXIS
+#define BMI160_ORIENT_AXIS 1
+#endif
+
+// 1 = перед esp_deep_sleep перевести BMI160 accel в suspend (если датчик остаётся на 3V3 — меньше утечка).
+#ifndef BMI160_SUSPEND_BEFORE_DSLEEP
+#define BMI160_SUSPEND_BEFORE_DSLEEP 1
+#endif
 
 // ---------- коды сообщений ----------
 #define CODE_WIFI_CONNECT "Wi-Fi connecting ..."      // подключение к Wi-Fi
@@ -132,6 +155,11 @@ class OledDisplayCompat {
   void setTextSize(uint8_t size) { oled_.setScale(constrain((int)size, 1, 4)); }
   void setTextColor(uint16_t) {}
   void setRotation(uint8_t) {}
+  /** 180°: одновременный flip по H и V (GyverOLED / SSD1306). */
+  void setUpsideDown(bool upsideDown) {
+    oled_.flipH(upsideDown);
+    oled_.flipV(upsideDown);
+  }
   void setCursor(int16_t x, int16_t y) { oled_.setCursorXY(x, y); }
   int16_t width() const { return SCREEN_WIDTH; }
 
@@ -225,6 +253,11 @@ RTC_DATA_ATTR bool displayBackupValid = false;
 RTC_DATA_ATTR int32_t driftCorrectionMs = 0;
 RTC_DATA_ATTR time_t lastSyncLocalEpoch = 0;
 RTC_DATA_ATTR time_t lastAutoOtaCheckEpoch = 0;
+RTC_DATA_ATTR bool displayUpsideDown = false;  // переворот OLED при «вверх ногами» (BMI160)
+RTC_DATA_ATTR bool otaUpdateAvailable = false;
+RTC_DATA_ATTR char otaAvailableVersion[24] = "";
+RTC_DATA_ATTR char otaAvailableDate[20] = "";
+RTC_DATA_ATTR char otaAvailableMessage[256] = "";
 
 static char wifiSSID[64] = "";
 static char wifiPassword[64] = "";
@@ -258,7 +291,7 @@ struct DeviceSettings {
   uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
   uint8_t tempSensorType;        // выбранный датчик температуры/влажности
-  bool bmi160Enabled;            // использовать ли BMI160 для wake/детекта движения
+  bool bmi160Enabled;            // BMI160: ориентация экрана по акселерометру (раз в минуту в runCycle)
   bool autoOtaEnabled;           // автоматическая проверка и установка OTA
   uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
@@ -290,7 +323,7 @@ static DeviceSettings settings = {
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
   .tempSensorType = TEMP_SENSOR_SHT31,
-  .bmi160Enabled = false,
+  .bmi160Enabled = true,
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
   .activeWeekdaysMask = WEEKDAY_MASK_ALL
@@ -340,7 +373,9 @@ static float hum = 50.0;
 static bool indoorBmpOk = false;
 static bool displayOn = true;
 static bool wokeByWeatherButton = false;
-static bool wokeByMotionSensor = false;
+static bool bmi160Ready = false;
+static bool runManualOtaInstall();
+static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs);
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -371,16 +406,321 @@ bool hasValidTime(time_t epoch) {
   return epoch > 100000;
 }
 
-bool isWeatherButtonPressed() {
+static bool readDebouncedLow(uint8_t pin) {
   // Простая фильтрация дребезга: 5 быстрых чтений
   uint8_t lowCount = 0;
   for (uint8_t i = 0; i < 5; i++) {
-    if (digitalRead(WEATHER_BUTTON_PIN) == LOW) {
+    if (digitalRead(pin) == LOW) {
       lowCount++;
     }
     delay(2);
   }
   return lowCount >= 4;
+}
+
+bool isWeatherButtonPressed() {
+  return readDebouncedLow(WEATHER_BUTTON_PIN);
+}
+
+bool isOtaInfoButtonPressed() {
+  return readDebouncedLow(OTA_BUTTON_PIN);
+}
+
+static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
+  if (releaseDate) {
+    *releaseDate = "";
+  }
+  if (whatsNew) {
+    *whatsNew = "";
+  }
+  HTTPClient http;
+  if (!http.begin(AUTOOTA_MANIFEST_URL)) {
+    return;
+  }
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    return;
+  }
+  String body = http.getString();
+  http.end();
+
+  DynamicJsonDocument doc(4096);
+  if (deserializeJson(doc, body) != DeserializationError::Ok) {
+    return;
+  }
+  if (releaseDate && doc["releaseDate"].is<const char *>()) {
+    *releaseDate = String((const char *)doc["releaseDate"]);
+  }
+  // Поддержка двух имен: новое поле whatsNew и старое notes.
+  if (whatsNew) {
+    if (doc["whatsNew"].is<const char *>()) {
+      *whatsNew = String((const char *)doc["whatsNew"]);
+    } else if (doc["notes"].is<const char *>()) {
+      *whatsNew = String((const char *)doc["notes"]);
+    }
+  }
+}
+
+static void showOtaUpdateInfoScreen() {
+  const char *msg = otaAvailableMessage[0] ? otaAvailableMessage : "(no details)";
+  const size_t msgLen = strnlen(msg, sizeof(otaAvailableMessage) - 1);
+  const size_t charsPerPage = 22U * 3U;
+  uint8_t totalPages = (uint8_t)((msgLen + charsPerPage - 1U) / charsPerPage);
+  if (totalPages == 0) {
+    totalPages = 1;
+  }
+  uint8_t page = 0;
+  bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
+  uint32_t lastActionMs = millis();
+
+  auto drawPage = [&](uint8_t pageIdx) {
+    size_t base = (size_t)pageIdx * charsPerPage;
+    applyDisplayOrientation();
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Update: ");
+    display.println(otaAvailableVersion[0] ? otaAvailableVersion : "unknown");
+    display.setCursor(0, 10);
+    display.print("Date: ");
+    display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
+    char pbuf[12];
+    snprintf(pbuf, sizeof(pbuf), "New %u/%u", (unsigned)(pageIdx + 1), (unsigned)totalPages);
+    display.setCursor(0, 20);
+    display.println(pbuf);
+
+    char line[23];
+    for (uint8_t row = 0; row < 3; row++) {
+      size_t from = base + (size_t)row * 22U;
+      if (from >= msgLen) {
+        break;
+      }
+      size_t n = msgLen - from;
+      if (n > 22U) n = 22U;
+      memcpy(line, msg + from, n);
+      line[n] = '\0';
+      display.setCursor(0, 30 + row * 10);
+      display.println(line);
+    }
+    display.display();
+  };
+
+  drawPage(page);
+  while ((uint32_t)(millis() - lastActionMs) < 9000UL) {
+    bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
+    if (low && !prevLow) {
+      // Долгое удержание => подтверждение установки. Короткое нажатие => следующая страница.
+      if (otaInfoButtonLongHoldConfirm(2000UL)) {
+        runManualOtaInstall();
+        return;
+      }
+      page = (uint8_t)((page + 1U) % totalPages);
+      drawPage(page);
+      lastActionMs = millis();
+    }
+    prevLow = low;
+    delay(20);
+  }
+}
+
+static bool ensureWiFiConnectedForOta() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.begin(wifiSSID, wifiPassword, 15);
+  uint32_t startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 15000UL) {
+    delay(200);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+static bool runManualOtaInstall() {
+  const uint32_t t0 = millis();
+  applyDisplayOrientation();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("OTA install...");
+  display.setCursor(0, 12);
+  display.println("WiFi connect");
+  display.display();
+
+  if (!ensureWiFiConnectedForOta()) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("OTA failed");
+    display.setCursor(0, 12);
+    display.println("WiFi error");
+    display.display();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  String newVersion;
+  String notes;
+  String binPath;
+  bool hasInfo = autoOta.checkUpdate(&newVersion, &notes, &binPath);
+  if (!hasInfo || !autoOta.hasUpdate()) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("No update");
+    display.display();
+    otaUpdateAvailable = false;
+    otaAvailableVersion[0] = '\0';
+    otaAvailableDate[0] = '\0';
+    otaAvailableMessage[0] = '\0';
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Installing...");
+  display.setCursor(0, 12);
+  display.println(newVersion);
+  char tbuf[20];
+  snprintf(tbuf, sizeof(tbuf), "t=%lus", (unsigned long)((millis() - t0) / 1000UL));
+  display.setCursor(0, 24);
+  display.println(tbuf);
+  display.drawRect(0, 56, 128, 7, SSD1306_WHITE);
+  display.fillRect(1, 57, 126, 5, SSD1306_WHITE);
+  display.display();
+
+  bool ok = autoOta.updateNow();
+  if (!ok && autoOta.hasError()) {
+    Serial.printf("[AutoOTA] manual updateNow error: %d\n", (int)autoOta.getError());
+  }
+  if (!ok) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Install failed");
+    display.display();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  // При успехе updateNow() обычно перезагружает устройство. На случай возврата:
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Install done");
+  display.setCursor(0, 12);
+  display.println("Rebooting...");
+  display.display();
+  delay(1200);
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  return true;
+}
+
+static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs) {
+  const uint32_t start = millis();
+  const int16_t barX = 0;
+  const int16_t barY = 56;
+  const int16_t barW = 128;
+  const int16_t barH = 7;
+  while ((uint32_t)(millis() - start) < holdMs) {
+    if (digitalRead(OTA_BUTTON_PIN) != LOW) {
+      return false;
+    }
+    uint32_t elapsed = (uint32_t)(millis() - start);
+    uint32_t filled = (elapsed >= holdMs) ? (uint32_t)(barW - 2) : ((uint32_t)(barW - 2) * elapsed) / holdMs;
+    uint32_t leftMs = holdMs - elapsed;
+    applyDisplayOrientation();
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Install ");
+    display.println(otaAvailableVersion[0] ? otaAvailableVersion : "update");
+    char timerBuf[20];
+    snprintf(timerBuf, sizeof(timerBuf), "Hold %lu.%lus",
+             (unsigned long)(leftMs / 1000UL),
+             (unsigned long)((leftMs % 1000UL) / 100UL));
+    display.setCursor(0, 12);
+    display.println(timerBuf);
+    display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
+    if (filled > 0) {
+      display.fillRect(barX + 1, barY + 1, (int16_t)filled, barH - 2, SSD1306_WHITE);
+    }
+    display.display();
+    delay(30);
+  }
+  return true;
+}
+
+void applyDisplayOrientation() {
+  display.setUpsideDown(displayUpsideDown);
+}
+
+void updateDisplayOrientationFromBmi160() {
+  if (!settings.bmi160Enabled || !bmi160Ready) {
+#if BMI160_ORIENT_DIAG_SERIAL
+    static uint32_t s_lastSkipLogMs;
+    if (settings.bmi160Enabled && !bmi160Ready &&
+        (uint32_t)(millis() - s_lastSkipLogMs) > 120000UL) {
+      s_lastSkipLogMs = millis();
+      Serial.println("[BMI160] orient: bmi160Ready=false (нет чипа / ошибка init)");
+    }
+#endif
+    return;
+  }
+  BMI160AccelSample s{};
+  if (!readBMI160Accel(s)) {
+#if BMI160_ORIENT_DIAG_SERIAL
+    Serial.println("[BMI160] orient: readBMI160Accel failed (I2C?)");
+#endif
+    return;
+  }
+
+  const int thr = 2200;
+#if BMI160_ORIENT_AXIS == 0
+  const int16_t gAxis = s.x;
+  const char axisCh = 'X';
+#elif BMI160_ORIENT_AXIS == 1
+  const int16_t gAxis = s.y;
+  const char axisCh = 'Y';
+#elif BMI160_ORIENT_AXIS == 2
+  const int16_t gAxis = s.z;
+  const char axisCh = 'Z';
+#else
+#error BMI160_ORIENT_AXIS must be 0, 1, or 2
+#endif
+
+  const int ag = abs((int)gAxis);
+  const bool thrOk = ag >= thr;
+#if BMI160_ORIENT_DIAG_SERIAL
+  Serial.printf("[BMI160] orient: ax=%d ay=%d az=%d axis=%c g=%d |g|=%d thr=%d ok=%d flipNow=%d\n",
+                (int)s.x,
+                (int)s.y,
+                (int)s.z,
+                axisCh,
+                (int)gAxis,
+                ag,
+                thr,
+                (int)thrOk,
+                (int)displayUpsideDown);
+#endif
+  if (!thrOk) {
+    return;
+  }
+
+  bool upside = (gAxis < 0);
+#if BMI160_ORIENT_INVERT
+  upside = !upside;
+#endif
+  if (upside != displayUpsideDown) {
+    displayUpsideDown = upside;
+    applyDisplayOrientation();
+    Serial.printf("[BMI160] orient CHANGED upsideDown=%d (axis=%c g=%d)\n", (int)upside, axisCh, (int)gAxis);
+  }
 }
 
 time_t applyDriftCorrection(time_t baseEpoch, time_t referenceEpoch) {
@@ -532,7 +872,7 @@ void loadSettings() {
     settings.weatherUpdateHours = 1;
     settings.weatherScreenSeconds = 10;
     settings.tempSensorType = TEMP_SENSOR_SHT31;
-    settings.bmi160Enabled = false;
+    settings.bmi160Enabled = true;
     settings.autoOtaEnabled = true;
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
@@ -582,6 +922,8 @@ void loadSettings() {
   }
   settings.autoOtaEnabled = settings.autoOtaEnabled ? true : false;
   settings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
+
+  displayUpsideDown = !!displayUpsideDown;
 }
 
 void saveSettings() {
@@ -869,6 +1211,10 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
   }
   if (!autoOta.hasUpdate()) {
     Serial.println("[AutoOTA] No update");
+    otaUpdateAvailable = false;
+    otaAvailableVersion[0] = '\0';
+    otaAvailableDate[0] = '\0';
+    otaAvailableMessage[0] = '\0';
     return;
   }
 
@@ -877,10 +1223,14 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
     Serial.printf("[AutoOTA] Notes: %s\n", notes.c_str());
   }
   Serial.printf("[AutoOTA] Bin: %s\n", binPath.c_str());
-  bool ok = autoOta.updateNow();
-  if (!ok && autoOta.hasError()) {
-    Serial.printf("[AutoOTA] updateNow error: %d\n", (int)autoOta.getError());
-  }
+  otaUpdateAvailable = true;
+  strlcpy(otaAvailableVersion, newVersion.c_str(), sizeof(otaAvailableVersion));
+  String releaseDate;
+  String whatsNew;
+  fetchOtaManifestMeta(&releaseDate, &whatsNew);
+  strlcpy(otaAvailableDate, releaseDate.c_str(), sizeof(otaAvailableDate));
+  strlcpy(otaAvailableMessage, whatsNew.c_str(), sizeof(otaAvailableMessage));
+  Serial.println("[AutoOTA] Update is available (manual confirm pending)");
 #else
   (void)local;
   (void)timeValid;
@@ -913,11 +1263,22 @@ void drawBattery(uint8_t bars) {
   }
 }
 
+static void drawOtaAvailableIcon() {
+  // Небольшая иконка "обновление доступно": коробка + стрелка вниз.
+  const int16_t x = 95;
+  const int16_t y = 1;
+  display.drawRect(x, y + 4, 10, 6, SSD1306_WHITE);
+  display.fillRect(x + 4, y, 2, 5, SSD1306_WHITE);
+  display.fillRect(x + 3, y + 3, 4, 2, SSD1306_WHITE);
+}
+
 /*
 * Вывод на экран
 */
 
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
+  updateDisplayOrientationFromBmi160();
+  applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
 
@@ -937,6 +1298,9 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
     display.print(dateBuf);
   }
   // 3) Индикатор заряда — вверху справа (как раньше)
+  if (otaUpdateAvailable) {
+    drawOtaAvailableIcon();
+  }
   drawBattery(batBars);
 
   //display.drawLine(0, 20, 128, 20, SSD1306_WHITE); // разделительная линия
@@ -1169,6 +1533,9 @@ uint32_t runCycle() {
   bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
   bool workdayEnabled = timeValid ? isWeekdayEnabled(ti.tm_wday) : true;
 
+  // Ориентацию по BMI160 читаем не здесь, а непосредственно перед отрисовкой: до drawClock()
+  // может уйти много времени на WiFi/NTP/погоду — иначе переворот «после пробуждения» не попадает в выборку.
+
   // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
   if (timeValid && workdayEnabled && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
     logToDisplay(CODE_WEATHER_FETCH);
@@ -1239,11 +1606,21 @@ uint32_t runCycle() {
   } else if (!night && workdayEnabled) {
     setDisplayState(true);
     setBrightness(0x01);
+    updateDisplayOrientationFromBmi160();
+    applyDisplayOrientation();
 
-    // Показываем детали погоды либо после wakeup по кнопке,
-    // либо если кнопку (GPIO4) держат замкнутой прямо сейчас.
     bool weatherButtonPressedNow = isWeatherButtonPressed();
-    if (wokeByWeatherButton || wokeByMotionSensor || weatherButtonPressedNow) {
+    if (otaUpdateAvailable && (wokeByWeatherButton || weatherButtonPressedNow)) {
+      showOtaUpdateInfoScreen();
+      // Короткое нажатие — только просмотр. Удержание ~2с — подтверждение установки.
+      if (otaInfoButtonLongHoldConfirm(2000UL)) {
+        runManualOtaInstall();
+      } else {
+        delay(900);
+      }
+    } else if (wokeByWeatherButton || weatherButtonPressedNow) {
+      // Показываем детали погоды либо после wakeup по кнопке,
+      // либо если кнопку (GPIO4) держат замкнутой прямо сейчас.
       uint32_t detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
       uint8_t detailPage = 0;
       bool prevBtnLow = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
@@ -1344,19 +1721,20 @@ void enterDeepSleep(uint32_t sleepSeconds) {
   if (sleepSeconds == 0) {
     sleepSeconds = 60;
   }
-  // Разрешаем пробуждение:
-  // - GPIO4 (кнопка) по LOW
-  // - GPIO5 (BMI160 INT1) по HIGH
+#if BMI160_SUSPEND_BEFORE_DSLEEP
+  if (settings.bmi160Enabled && bmi160Ready) {
+    if (bmi160SuspendAccelForSleep()) {
+#if BMI160_ORIENT_DIAG_SERIAL
+      Serial.println("[BMI160] accel suspend before deep sleep");
+#endif
+    }
+  }
+#endif
+  // Пробуждение: GPIO4 (кнопка погоды) по LOW. BMI160 не будит из сна — ориентация в runCycle.
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
   esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
-  if (settings.bmi160Enabled) {
-    pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
-    gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
-    gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
-    esp_deep_sleep_enable_gpio_wakeup((1ULL << BMI160_INT1_PIN), ESP_GPIO_WAKEUP_GPIO_HIGH);
-  }
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
 }
@@ -1365,11 +1743,9 @@ void setup() {
   Serial.begin(9600);
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   wokeByWeatherButton = false;
-  wokeByMotionSensor = false;
   if (wakeCause == ESP_SLEEP_WAKEUP_GPIO) {
     uint64_t wakeMask = esp_sleep_get_gpio_wakeup_status();
     wokeByWeatherButton = (wakeMask & (1ULL << WEATHER_BUTTON_PIN)) != 0;
-    wokeByMotionSensor = (wakeMask & (1ULL << BMI160_INT1_PIN)) != 0;
   }
 
   // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
@@ -1400,6 +1776,9 @@ void setup() {
   pinMode(BAT_PIN, INPUT);
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
+#if defined(ARDUINO_ARCH_ESP32) && defined(WIRE_HAS_TIMEOUT)
+  Wire.setTimeOut(50);
+#endif
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     pinMode(LED_PIN, OUTPUT);
@@ -1418,6 +1797,7 @@ void setup() {
 
   // Загрузка настроек устройства
   loadSettings();
+  applyDisplayOrientation();
 
   if (settings.tempSensorType > TEMP_SENSOR_HTU21) {
     settings.tempSensorType = TEMP_SENSOR_SHT31;
@@ -1443,6 +1823,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
   Serial.printf("Weather button GPIO%d state=%d\n", WEATHER_BUTTON_PIN, digitalRead(WEATHER_BUTTON_PIN));
@@ -1450,14 +1831,17 @@ void setup() {
     pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
     gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);
     gpio_pulldown_en((gpio_num_t)BMI160_INT1_PIN);
-    bool bmi160OK = initBMI160MotionWake();
-    logToDisplay(bmi160OK ? CODE_BMI160_OK : CODE_BMI160_ERR);
-    Serial.printf("BMI160 INT1 GPIO%d state=%d, wakeByMotion=%d\n",
+    bmi160Ready = initBMI160Sensor();
+    if (bmi160Ready) {
+      updateDisplayOrientationFromBmi160();
+    }
+    logToDisplay(bmi160Ready ? CODE_BMI160_OK : CODE_BMI160_ERR);
+    Serial.printf("BMI160 INT1 GPIO%d state=%d ready=%d\n",
                   BMI160_INT1_PIN,
                   digitalRead(BMI160_INT1_PIN),
-                  (int)wokeByMotionSensor);
+                  (int)bmi160Ready);
   } else {
-    wokeByMotionSensor = false;
+    bmi160Ready = false;
     Serial.println("BMI160 is disabled in settings");
   }
 
