@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.7"
+#define ROM_VERSION "A1.4.8"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -55,7 +55,7 @@
 #define LED_PIN 0
 #define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
-#define OTA_BUTTON_PIN WEATHER_BUTTON_PIN
+#define OTA_BUTTON_PIN 2
 #define BMI160_INT1_PIN 5
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
@@ -99,8 +99,6 @@
 #define BMI160_ORIENT_INVERT 1
 #endif
 
-// Ось BMI160, по **знаку** которой определяется переворот OLED (зависит от того, как чип припаян к плате):
-// 0=X, 1=Y, 2=Z. Раньше бралась «доминирующая» ось (max |ax|,|ay|,|az|) — при креплении, когда |Z|>|Y|,
 // переворот корпуса менял знак у Y, а алгоритм смотрел на Z и не реагировал как ожидалось.
 #ifndef BMI160_ORIENT_AXIS
 #define BMI160_ORIENT_AXIS 1
