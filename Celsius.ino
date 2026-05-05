@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.2"
+#define ROM_VERSION "A1.4.3"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -465,33 +465,44 @@ static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
 static void showOtaUpdateInfoScreen() {
   const char *msg = otaAvailableMessage[0] ? otaAvailableMessage : "(no details)";
   const size_t msgLen = strnlen(msg, sizeof(otaAvailableMessage) - 1);
-  const size_t charsPerPage = 22U * 3U;
-  uint8_t totalPages = (uint8_t)((msgLen + charsPerPage - 1U) / charsPerPage);
-  if (totalPages == 0) {
-    totalPages = 1;
+  const size_t firstPageChars = 22U * 3U;  // 3 строки текста после версии/даты
+  const size_t nextPageChars = 22U * 6U;   // со 2-й страницы только текст: 6 строк
+  uint8_t totalPages = 1;
+  if (msgLen > firstPageChars) {
+    const size_t rem = msgLen - firstPageChars;
+    totalPages = (uint8_t)(1U + (rem + nextPageChars - 1U) / nextPageChars);
   }
   uint8_t page = 0;
   bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
   uint32_t lastActionMs = millis();
 
   auto drawPage = [&](uint8_t pageIdx) {
-    size_t base = (size_t)pageIdx * charsPerPage;
+    size_t base = 0;
+    uint8_t rowCount = 0;
+    int16_t textY0 = 0;
     applyDisplayOrientation();
     display.clearDisplay();
     display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.print("Update: ");
-    display.println(otaAvailableVersion[0] ? otaAvailableVersion : "unknown");
-    display.setCursor(0, 10);
-    display.print("Date: ");
-    display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
-    char pbuf[12];
-    snprintf(pbuf, sizeof(pbuf), "New %u/%u", (unsigned)(pageIdx + 1), (unsigned)totalPages);
-    display.setCursor(0, 20);
-    display.println(pbuf);
+
+    if (pageIdx == 0) {
+      display.setCursor(0, 0);
+      display.print(ROM_VERSION);
+      display.print(" > ");
+      display.println(otaAvailableVersion[0] ? otaAvailableVersion : "unknown");
+      display.setCursor(0, 10);
+      display.print("Date: ");
+      display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
+      base = 0;
+      rowCount = 3;
+      textY0 = 30;
+    } else {
+      base = firstPageChars + (size_t)(pageIdx - 1U) * nextPageChars;
+      rowCount = 6;
+      textY0 = 0;
+    }
 
     char line[23];
-    for (uint8_t row = 0; row < 3; row++) {
+    for (uint8_t row = 0; row < rowCount; row++) {
       size_t from = base + (size_t)row * 22U;
       if (from >= msgLen) {
         break;
@@ -500,7 +511,7 @@ static void showOtaUpdateInfoScreen() {
       if (n > 22U) n = 22U;
       memcpy(line, msg + from, n);
       line[n] = '\0';
-      display.setCursor(0, 30 + row * 10);
+      display.setCursor(0, textY0 + row * 10);
       display.println(line);
     }
     display.display();
@@ -1264,12 +1275,12 @@ void drawBattery(uint8_t bars) {
 }
 
 static void drawOtaAvailableIcon() {
-  // Небольшая иконка "обновление доступно": коробка + стрелка вниз.
-  const int16_t x = 90;
+  const int16_t x = 88;
   const int16_t y = 1;
   display.drawRect(x, y + 4, 10, 6, SSD1306_WHITE);
   display.fillRect(x + 4, y, 2, 5, SSD1306_WHITE);
   display.fillRect(x + 3, y + 3, 4, 2, SSD1306_WHITE);
+  display.fillRect(x + 4, y - 1, 1, 1, SSD1306_WHITE);
 }
 
 /*
