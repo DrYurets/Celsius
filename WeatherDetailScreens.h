@@ -233,14 +233,20 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       }
 
       if (!isnan(windDirDeg)) {
-        const int16_t cx = 102;
-        const int16_t cy = 22;  // было 12: опустить стрелку на 10 px
+        // Центр правой свободной области (экран "Направление ветра"),
+        // чтобы стрелка была максимально по центру доступного пространства.
+        const int16_t cx = 106;
+        const int16_t cy = 16;
         const float rad = windDirDeg * 0.0174532925f;
         const float vx = -sinf(rad);
         const float vy = cosf(rad);
-        const int16_t tipX = cx + (int16_t)lroundf(vx * 24.0f);
-        const int16_t tipY = cy + (int16_t)lroundf(vy * 24.0f);
-        drawLineBresenham(display, cx, cy, tipX, tipY);
+        // Стрелка вращается вокруг своего центра (cx, cy), а не вокруг "тупого" конца.
+        const float halfLen = 12.0f;
+        const int16_t tailX = cx - (int16_t)lroundf(vx * halfLen);
+        const int16_t tailY = cy - (int16_t)lroundf(vy * halfLen);
+        const int16_t tipX = cx + (int16_t)lroundf(vx * halfLen);
+        const int16_t tipY = cy + (int16_t)lroundf(vy * halfLen);
+        drawLineBresenham(display, tailX, tailY, tipX, tipY);
         const float bx = -vx;
         const float by = -vy;
         const float p1x = bx * 6.0f + vy * 4.0f;

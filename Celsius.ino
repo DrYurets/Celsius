@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.0"
+#define ROM_VERSION "A1.4.1"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -1673,6 +1673,15 @@ uint32_t runCycle() {
     }
 
     drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
+    // Если пользователь перевернул часы сразу после пробуждения,
+    // второе чтение BMI160 может зафиксировать изменение знака и перерисовать картинку.
+    if (settings.bmi160Enabled && bmi160Ready) {
+      const bool upsideAfterDraw = displayUpsideDown;
+      updateDisplayOrientationFromBmi160();
+      if (displayUpsideDown != upsideAfterDraw) {
+        drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
+      }
+    }
   } else {
     display.clearDisplay();
     display.display();
