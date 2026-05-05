@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.5"
+#define ROM_VERSION "A1.4.7"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -257,7 +257,7 @@ RTC_DATA_ATTR bool displayUpsideDown = false;  // переворот OLED при
 RTC_DATA_ATTR bool otaUpdateAvailable = false;
 RTC_DATA_ATTR char otaAvailableVersion[24] = "";
 RTC_DATA_ATTR char otaAvailableDate[20] = "";
-RTC_DATA_ATTR char otaAvailableMessage[256] = "";
+RTC_DATA_ATTR char otaAvailableMessage[512] = "";
 
 static char wifiSSID[64] = "";
 static char wifiPassword[64] = "";
@@ -513,7 +513,9 @@ static void showOtaUpdateInfoScreen() {
   }
 
   const uint8_t firstPageLines = 3;
-  const uint8_t nextPageLines = 6;
+  const uint8_t nextPageLines = 5;  // плотность ниже, чтобы строки на 2+ страницах не налезали
+  const int16_t firstPageLineStep = 10;
+  const int16_t nextPageLineStep = 12;
   uint8_t totalPages = 1;
   if (wrappedCount > firstPageLines) {
     uint8_t rem = (uint8_t)(wrappedCount - firstPageLines);
@@ -527,6 +529,7 @@ static void showOtaUpdateInfoScreen() {
     uint8_t lineFrom = 0;
     uint8_t rowCount = 0;
     int16_t textY0 = 0;
+    int16_t lineStep = firstPageLineStep;
     applyDisplayOrientation();
     display.clearDisplay();
     display.setTextSize(1);
@@ -542,10 +545,12 @@ static void showOtaUpdateInfoScreen() {
       lineFrom = 0;
       rowCount = firstPageLines;
       textY0 = 30;
+      lineStep = firstPageLineStep;
     } else {
       lineFrom = (uint8_t)(firstPageLines + (pageIdx - 1U) * nextPageLines);
       rowCount = nextPageLines;
       textY0 = 0;
+      lineStep = nextPageLineStep;
     }
 
     for (uint8_t row = 0; row < rowCount; row++) {
@@ -553,7 +558,7 @@ static void showOtaUpdateInfoScreen() {
       if (lineIdx >= wrappedCount) {
         break;
       }
-      display.setCursor(0, textY0 + row * 10);
+      display.setCursor(0, textY0 + row * lineStep);
       display.println(wrapped[lineIdx]);
     }
     display.display();
