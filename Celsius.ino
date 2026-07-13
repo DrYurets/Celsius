@@ -1,3 +1,5 @@
+// Версия 1.0.1
+
 #include <Wire.h>
 #include <cstring>
 #include <Adafruit_GFX.h>
@@ -134,7 +136,7 @@ struct DeviceSettings {
   bool weatherEnabled;           // включить получение погоды
   uint8_t weatherSource;         // 0=Open-Meteo, 1=OpenWeather
   char weatherApiUrl[200];       // URL API для получения погоды
-  uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
+  uint8_t weatherUpdateHours;    // интервал NTP + погоды в часах (активный режим)
   uint8_t weatherScreenSeconds;  // длительность экрана подробной погоды по GPIO4
 };
 
@@ -423,15 +425,15 @@ String getConfigPage() {
   html += "<input type='number' name='nightEndM' min='0' max='59' value='" + String(settings.nightEndM) + "' required>";
   html += "</div>";
 
-  html += "<h2>NTP Sync Settings</h2>";
-  html += "<label>Days between NTP syncs:</label>";
-  html += "<input type='number' name='syncDays' min='1' max='30' value='" + String(settings.syncDays) + "' required>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to sync time with NTP servers (1-30 days)</p>";
-
   html += "<h2>Time Correction</h2>";
   html += "<label>Time correction (seconds per day):</label>";
   html += "<input type='number' name='timeCorrectionPerDay' value='" + String(settings.timeCorrectionPerDay) + "' step='1' style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Positive = speed up, negative = slow down. Example: +240 if clock is 4 min slow per day</p>";
+
+  html += "<h2>Time and Network Sync</h2>";
+  html += "<label>Update interval (hours):</label>";
+  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>NTP time sync runs on this interval in active (daytime) mode. Weather is fetched in the same WiFi session when enabled below (1-24 h).</p>";
 
   html += "<h2>Weather Settings</h2>";
   html += "<div class='checkbox-label'><input type='checkbox' name='weatherEnabled' id='weatherEnabled' " + String(settings.weatherEnabled ? "checked" : "") + " onchange='toggleWeatherSettings()'><label>Enable weather data</label></div>";
@@ -449,11 +451,9 @@ String getConfigPage() {
   weatherUrlEscaped.replace("\"", "&quot;");
   weatherUrlEscaped.replace("'", "&#39;");
   html += "<input type='text' name='weatherApiUrl' value='" + weatherUrlEscaped + "' style='margin-bottom: 10px;'>";
-  html += "<label>Update interval (hours):</label>";
-  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
   html += "<label>Weather detail screen (sec):</label>";
   html += "<input type='number' name='weatherScreenSeconds' min='1' max='60' value='" + String(settings.weatherScreenSeconds) + "' required style='margin-bottom: 10px;'>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather (1-24 h). GPIO4 short to GND: wake + show cached details (no extra HTTP).</p>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>GPIO4 short to GND: wake + show cached details (no extra HTTP).</p>";
   html += "</div>";
   html += "<script>";
   html += "function toggleWeatherSettings() {";
@@ -869,27 +869,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   displayBackupValid = true;
 }
 
-bool ntpSync() {
-  logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
-  setCpuPerformance();
-
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  WiFi.begin(wifiSSID, wifiPassword);
-
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
-    delay(250);
-  }
-  if (WiFi.status() != WL_CONNECTED) {
-    logToDisplay(CODE_WIFI_FAIL);
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    setCpuLowPower();
-    return false;
-  }
+static bool applyNtpUpdate() {
   logToDisplay(CODE_NTP_SYNC, nullptr, 0);
   timeClient.begin();
   timeClient.setPoolServerName(ntpServers[ntpServerIndex]);
@@ -915,6 +895,38 @@ bool ntpSync() {
     logToDisplay(CODE_NTP_ERROR);
     ntpServerIndex = (ntpServerIndex + 1) % ntpServerCount;
   }
+  return ok;
+}
+
+static bool ntpSyncOverConnectedWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  return applyNtpUpdate();
+}
+
+bool ntpSync() {
+  logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
+  setCpuPerformance();
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.begin(wifiSSID, wifiPassword);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
+    delay(250);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    logToDisplay(CODE_WIFI_FAIL);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    setCpuLowPower();
+    return false;
+  }
+  bool ok = applyNtpUpdate();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   setCpuLowPower();
@@ -931,18 +943,8 @@ uint32_t runCycle() {
     localtime_r(&local, &ti);
   }
 
-  bool needSync = !timeValid;
-  if (timeValid && lastSyncLocalEpoch > 0) {
-    uint32_t syncPeriodSec = (uint32_t)settings.syncDays * 24UL * 3600UL;
-    if ((storedEpoch - lastSyncLocalEpoch) >= syncPeriodSec) {
-      needSync = true;
-    }
-  }
-
-  if (needSync) {
-    if (!timeValid) {
-      logToDisplay(CODE_FIRST_SYNC);
-    }
+  if (!timeValid) {
+    logToDisplay(CODE_FIRST_SYNC);
     if (ntpSync()) {
       local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
       local = applyTimeCorrection(local, lastSyncLocalEpoch);
@@ -1003,8 +1005,8 @@ uint32_t runCycle() {
 
   bool night = timeValid && isNight(ti.tm_hour, ti.tm_min);
 
-  // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
-  if (settings.weatherEnabled && timeValid && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+  // NTP + погода по одному интервалу (weatherUpdateHours), только в активном дневном режиме
+  if (timeValid && !night && shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled)) {
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
 
@@ -1036,24 +1038,32 @@ uint32_t runCycle() {
     snprintf(detail, sizeof(detail), "Final st=%d", wifiStatus);
     logToDisplay(CODE_WEATHER_FETCH, detail);
 
+    bool ntpOk = false;
     if (wifiStatus == WL_CONNECTED) {
-      bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
-      if (success) {
-        lastWeatherUpdate = local;  // та же шкала, что в shouldUpdateWeather() (не time(nullptr))
-        snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
-        logToDisplay(CODE_WEATHER_OK, detail);
-      } else {
-        logToDisplay(CODE_WEATHER_ERROR);
-        // Обновляем время последней попытки даже при ошибке, чтобы не пытаться каждую минуту
-        // shouldUpdateWeather() использует меньший интервал (5 минут) для повторных попыток при ошибке
-        lastWeatherUpdate = local;
+      ntpOk = ntpSyncOverConnectedWiFi();
+      local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
+      local = applyTimeCorrection(local, lastSyncLocalEpoch);
+      timeValid = hasValidTime(local);
+      if (timeValid) {
+        localtime_r(&local, &ti);
+      }
+
+      if (settings.weatherEnabled) {
+        bool success = fetchOutdoorTemperature(settings.weatherApiUrl, settings.weatherSource);
+        if (success) {
+          snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
+          logToDisplay(CODE_WEATHER_OK, detail);
+        } else {
+          logToDisplay(CODE_WEATHER_ERROR);
+        }
       }
     } else {
       snprintf(detail, sizeof(detail), "Status=%d", wifiStatus);
       logToDisplay(CODE_WEATHER_WIFI_FAIL, detail);
-      // Обновляем время последней попытки даже при ошибке WiFi
-      lastWeatherUpdate = local;
     }
+
+    lastNetworkUpdate = local;
+    lastNetworkNtpOk = ntpOk;
 
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
