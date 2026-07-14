@@ -2,7 +2,7 @@
 Перед началом выполнения любой задачи АГЕНТ ДОЛЖЕН:
 1) Неукоснительно соблюдать требования, описанные в этом файле.
 2) Полностью перечитать `AGENTS.md` перед каждым началом выполнения задачи, так как он может постоянно дополняться/модифицироваться.
-3) **Версия прошивки `ROM_VERSION`**: не увеличивать номер версии в `Celsius.ino` без явного указания пользователя в задаче. Если изменения скетча по смыслу требуют новой версии (или пользователь просит bump), **перед правкой `ROM_VERSION` уточнить у пользователя**, следует ли поднять версию и как (например, patch / minor / major или точная строка).
+3) **Версия прошивки `ROM_VERSION`**: не увеличивать номер версии в `Celsius.ino` без явного указания пользователя в задаче. Если изменения скетча по смыслу требуют новой версии (или пользователь просит bump), **перед правкой `ROM_VERSION` уточнить у пользователя**, следует ли поднять версию и как (например, patch / minor / major или точная строка). Вместе с `ROM_VERSION` обычно обновляют `project.json` (`version`, `releaseDate`, `whatsNew`/`notes`) для AutoOTA.
 
 # Celsius Clock (ESP32-C3) — AGENTS knowledge base
 
@@ -11,196 +11,157 @@
 - получает точное время через WiFi/NTP;
 - компенсирует дрейф RTC между NTP-синхронизациями и поддерживает ручную коррекцию;
 - обновляет экран и затем уходит в deep sleep до следующего нужного момента;
-- может (опционально) запрашивать уличную температуру с погодного API по HTTP (включая подробный debug в Serial и на экране).
+- может (опционально) запрашивать уличную температуру с погодного API по HTTP (включая подробный debug в Serial и на экране);
+- поддерживает ручной/веб OTA и проверку обновлений AutoOTA;
+- (ветка `128x64`) может переворачивать экран по BMI160 и показывать 7 экранов детальной погоды.
 
 ## Не ломать инварианты (самое важное)
 1. **Deep sleep и расписание пробуждения**: логика `runCycle()` возвращает число секунд до следующего пробуждения, затем вызывается `esp_deep_sleep_start()`. Любые новые сетевые/тяжёлые действия должны быть встроены так, чтобы не ломать сон и не увеличивать время активной фазы без необходимости.
-2. **WiFi**: часы не держат WiFi включенным постоянно. WiFi подключается при необходимости (NTP и/или погода), затем должен отключаться (особенно для погоды).
-3. **Weather fetch**: погодный запрос должен выполняться только когда это разрешено логикой (включена опция, не ночь, есть валидное время, интервал не истёк).
+2. **WiFi**: часы не держат WiFi включенным постоянно. WiFi подключается при необходимости (NTP и/или погода и/или AutoOTA), затем должен отключаться.
+3. **Сетевой цикл (NTP + погода)**: выполняется только в активном дневном режиме (`timeValid`, `workdayEnabled`, `!night`) и когда истёк интервал `settings.weatherUpdateHours` (`shouldUpdateNetwork`). В одном WiFi-сеансе: NTP → (опционально) AutoOTA → (если `weatherEnabled`) погода.
 4. **EEPROM layout**: настройки хранятся в EEPROM по фиксированным адресам; `EEPROM_SIZE` должен быть достаточным для всей структуры `DeviceSettings`.
 5. **Debug codes**: функции логирования на OLED (`logToDisplay`) завязаны на флаги показа дебага. Не нужно безусловно “засорять” OLED — используйте `settings.showDebugCodes` и существующие коды.
 
 ## Версия прошивки (`ROM_VERSION`)
-- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (например, префикс конфигурации железа + семантическая версия вида `1.0.0`).
-- Значение выводится на OLED в **режиме настройки** (SoftAP): строка вида `v: <ROM_VERSION>` в `updateConfigModeDisplay()`, чтобы по устройству было видно, какая прошивка залита.
+- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.9`).
+- Значение выводится на OLED в **режиме настройки** (SoftAP): строка вида `v: <ROM_VERSION>` в `updateConfigModeDisplay()`.
+- Для AutoOTA версия также задаётся в `project.json` (`version`); после OTA/сборки бинарник обычно лежит в `build/esp32.esp32.esp32c3/Celsius.ino.bin`.
 - Агент **не меняет** `ROM_VERSION` про себя; см. пункт 3 в блоке **IMPORTANT** выше.
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, вычисление epoch, дрейф-коррекция, обработка погоды в цикле, отображение на OLED, web-админка, EEPROM I/O, deep sleep; пробуждение по кнопке погоды и показ детального экрана; константа **`ROM_VERSION`** для отображения версии в AP.
+   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO2); `ROM_VERSION`.
 2. `WeatherAPI.h`
-   - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON (ArduinoJson), хранение в **RTC** температуры/давления/влажности/ветра/иконок/прогноза.
+   - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`.
 3. `WeatherDetailScreens.h`
-   - отрисовка 5 экранов подробной погоды (GPIO4) для 128×64; данные только из RTC.
+   - отрисовка **7** экранов подробной погоды (GPIO4) для 128×64; данные только из RTC.
 4. `WebConfigServer.h`
-   - вся web-админка, включая сохранение настроек и OTA upload.
+   - web-админка, сохранение настроек, OTA upload, экспорт/импорт JSON.
+5. `project.json`
+   - манифест AutoOTA (`version`, `whatsNew`/`notes`, URL к `.bin`).
 
 ## Поддерживаемые варианты экрана (ветки)
-- `main`, `correction` — дисплей **128×32** (портретная ориентация).
-- `128x64` — дисплей **128×64** в **альбомной ориентации** (landscape). В этой ветке разметка адаптирована под 128×64 (и есть улучшения отображения даты/дня недели).
+- `main` — дисплей **128×32** (портретная ориентация).
+- `128x64` — дисплей **128×64** в **альбомной ориентации** (landscape). Разметка адаптирована под 128×64.
 
-При разработке нового функционала важно учитывать, что в коде могут быть координаты/ориентация/размеры, рассчитанные под конкретный вариант экрана. Сначала выбери правильную ветку.
+При разработке нового функционала важно учитывать координаты/ориентацию/размеры под конкретную ветку. Сначала выбери правильную ветку.
+
+### Сборка / partition scheme (важно)
+Ветка `128x64` с OTA и веб-админкой часто **не влезает** в схему **Default 4MB with spiffs (1.2MB APP)** (`Maximum is 1310720`). Для ESP32-C3 4MB выбирайте, например:
+- **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)** — лимит ~1 966 080 байт, OTA сохраняется.
+После смены схемы нужна **полная прошивка по USB** (желательно с Erase Flash), не только OTA.
 
 ## Архитектура времени
 ### NTP sync
-- В проекте используется `NTPClient` + список NTP серверов (`ntpServers[]`) и индекс (`ntpServerIndex`).
-- Функция `ntpSync()` отвечает за:
-  - включение/подключение WiFi,
-  - попытку получить корректный epoch (через `timeClient.forceUpdate()`),
-  - сохранение epoch как опорных значений (`storedEpoch`, `lastSyncEpoch`, `lastSyncLocalEpoch`),
-  - обновление дрейф-коррекции при наличии второй синхронизации.
+- `NTPClient` + список `ntpServers[]` / индекс `ntpServerIndex`.
+- `ntpSync()` — полноценный WiFi STA + NTP (первичная синхронизация при невалидном времени).
+- `ntpSyncOverConnectedWiFi()` — NTP, когда WiFi уже поднят (дневной сетевой цикл).
+- offset берётся из `settings.timezoneMinutes` через `getTimezoneOffsetSeconds()`.
+- Сохраняются `storedEpoch`, `lastSyncEpoch`, `lastSyncLocalEpoch`; при повторном sync обновляется `driftCorrectionMs`.
+
+### Периодический сетевой цикл (NTP + погода)
+- Интервал задаётся **`settings.weatherUpdateHours`** (1..24, по умолчанию 1) — одно поле админки **Time and Network Sync → Update interval (hours)**.
+- Проверка: `shouldUpdateNetwork(local, weatherUpdateHours, weatherEnabled)` в `WeatherAPI.h`.
+- Условия запуска в `runCycle()`: `timeValid && workdayEnabled && !night && shouldUpdateNetwork(...)`.
+- При успехе/попытке пишется `lastNetworkUpdate = local`; при ошибке NTP — `lastNetworkNtpOk = false` (повтор через ~5 мин).
+- Поле `syncDays` в `DeviceSettings` остаётся в EEPROM (совместимость layout), но **не задаёт** расписание NTP.
 
 ### RTC drift compensation
-- Дрейф хранится в `RTC_DATA_ATTR int32_t driftCorrectionMs`.
-- Опорная точка для вычисления/применения дрейфа — `lastSyncLocalEpoch`.
-- Для вычисления “локального” времени используются:
-  - `applyDriftCorrection(baseEpoch, referenceEpoch)`
-  - `applyTimeCorrection(baseEpoch, referenceEpoch)` (ручная коррекция, сек/сутки).
-- В `runCycle()` перед отрисовкой времени используется `storedEpoch` + поправки.
+- Дрейф: `RTC_DATA_ATTR int32_t driftCorrectionMs`, опора — `lastSyncLocalEpoch`.
+- `applyDriftCorrection` / `applyTimeCorrection` (сек/сутки из настроек).
+- В `runCycle()` перед отрисовкой: `storedEpoch` + поправки.
 
 ### Хранение epoch
-- `storedEpoch` и связанные поля хранятся в `RTC_DATA_ATTR`, чтобы после deep sleep часы “не начинали с нуля”.
+- `storedEpoch` и связанные поля — `RTC_DATA_ATTR`, чтобы после deep sleep не терять время.
 
 ## Web-админка (конфигурация)
 ### Setup mode
-- Если нет валидных WiFi-учётных данных или соединение не удаётся — устройство переходит в режим настройки.
-- В setup mode поднимается AP:
-  - `WiFi.mode(WIFI_AP)`
-  - SSID: `AP_SSID` (CelsiusClock)
-  - Password: `AP_PASSWORD`
-  - web server на порту `80` (`WebServer server(80)`).
-- Настройки выставляются через web-form.
-- На OLED в AP дополнительно показывается строка с **`ROM_VERSION`** (см. раздел «Версия прошивки»).
-- Для надёжности старта AP используется «чистый» рестарт WiFi-стека и до 3 попыток `WiFi.softAP(...)`:
-  - `WiFi.disconnect(true)` → `WiFi.mode(WIFI_OFF)` → `WiFi.mode(WIFI_AP)`
-  - затем логируется статус старта AP в Serial (`AP start: OK/FAIL, SSID, IP`).
+- Нет WiFi-учёток или первичная NTP/WiFi не удалась → SoftAP:
+  - SSID `AP_SSID` (CelsiusClock), password `AP_PASSWORD`, порт 80.
+- На OLED в AP: строка `v: <ROM_VERSION>`.
+- Старт AP: `disconnect` → `WIFI_OFF` → `WIFI_AP`, до 3 попыток `softAP`.
 
 ### EEPROM и сохранение настроек
-- Структура настроек: `DeviceSettings`
-  - флаги отображения (debug codes, date, weekday, 12/24, hourly blink),
-  - night mode start/end,
-  - `syncDays`,
-  - `timeCorrectionPerDay`,
-  - погода: `weatherEnabled`, `weatherSource` (legacy), `weatherLatitude`, `weatherLongitude`, `weatherApiUrl[768]`, `weatherUpdateHours`, `weatherScreenSeconds`.
-- Адреса EEPROM:
-  - SSID: `EEPROM_SSID_ADDR = 0` (64 байта)
-  - Password: `EEPROM_PASS_ADDR = 64` (64 байта)
-  - Settings: `EEPROM_SETTINGS_ADDR = 128`
-  - `EEPROM_SIZE` должен быть >= `EEPROM_SETTINGS_ADDR + sizeof(DeviceSettings)` (в текущем коде `2048` + `static_assert`).
-- Текущие дефолты прошивки:
-  - `weatherSource = Open-Meteo`
-  - `activeWeekdaysMask = WEEKDAY_MASK_ALL` (часы активны и в выходные)
-  - Open-Meteo URL генерируется из координат (`latitude/longitude`) и содержит `forecast_days=4` (для показа 3 дней вперед, начиная с завтра).
+- Структура `DeviceSettings` (фрагмент актуальных полей):
+  - флаги отображения (debug, date, weekday, 12/24, hourly blink),
+  - night mode, timezone, timeCorrectionPerDay,
+  - `syncDays` (legacy layout),
+  - погода: `weatherEnabled`, координаты, `weatherApiUrl[768]`, **`weatherUpdateHours`** (NTP+погода), `weatherScreenSeconds`,
+  - датчики: `tempSensorType`, `bmi160Enabled`,
+  - AutoOTA: `autoOtaEnabled`, `autoOtaCheckHours`,
+  - `activeWeekdaysMask`.
+- Адреса: SSID `0`, PASS `64`, Settings `128`; `EEPROM_SIZE` 2048 + `static_assert`.
+- Дефолты: Open-Meteo, `weatherUpdateHours = 1`, `activeWeekdaysMask = WEEKDAY_MASK_ALL`, `forecast_days=4` в URL.
 
 ## Погодный модуль (WeatherAPI.h)
 ### Ожидаемый формат JSON
-- Источник фиксирован: **Open-Meteo** Forecast API, см. [документацию](https://open-meteo.com/en/docs):
-  - ожидается объект **`current`** в корне ответа
-  - обязательно: **`temperature_2m`** (°C, округление до целого для главного экрана)
-  - для расширенных экранов дополнительно используются `hourly` (ветер/осадки/температуры) и `daily` (weather_code)
-  - URL в проекте поддерживает до **767 символов** (`weatherApiUrl[768]`)
+- Источник: **Open-Meteo** Forecast API:
+  - `current.temperature_2m` (для главного экрана — целое °C),
+  - `hourly` / `daily` для детальных экранов,
+  - URL до 767 символов (`weatherApiUrl[768]`).
 
 ### Интервалы обновления
-- `lastWeatherUpdate` хранится в RTC.
-- Время последнего **успешного** обновления задаётся в **`Celsius.ino`** значением **`local`** (та же шкала, что и в `shouldUpdateWeather`), а не `time(nullptr)`: libc-время не синхронизируется с `storedEpoch`, иначе интервал обновления считается неверно.
-- `shouldUpdateWeather(currentTime, updateHours)`:
-  - если `lastWeatherUpdate == 0` — первое обновление происходит сразу;
-  - если `updateHours == 0` или слишком большое — принудительно минимум `1` час (чтобы не обновлялось каждую минуту);
-  - если последняя погода неуспешна (outdoorTemperature = NaN) — повторная попытка через 5 минут;
-  - успешное обновление соблюдает полный интервал `updateHours * 3600`;
-  - если `currentTime - lastWeatherUpdate < 0` (время откатилось после NTP) — возвращает `true`, чтобы не блокировать обновление.
+- `lastNetworkUpdate` / `lastNetworkNtpOk` в RTC (та же шкала `local` / `storedEpoch`, не `time(nullptr)`).
+- `shouldUpdateNetwork(currentTime, updateHours, weatherEnabled)`:
+  - `lastNetworkUpdate == 0` → сразу;
+  - `updateHours` вне 1..24 → принудительно 1;
+  - ошибка NTP или (weatherEnabled и outdoor NaN) → период 5 минут;
+  - иначе `updateHours * 3600`;
+  - откат времени (`delta < 0`) → `true`.
 
 ### Экран подробной погоды (кнопка)
-- GPIO **`WEATHER_BUTTON_PIN` (GPIO4)**: замыкание на GND — пробуждение из deep sleep и/или показ детального экрана в текущем цикле (если кнопка удерживается LOW при отрисовке).
-- В `runCycle()` сначала выполняется обычная логика fetch, затем при нажатой/пробудившей кнопке показываются 5 экранов деталей (`kWeatherDetailScreenCount = 5`).
-- **Повторного HTTP-запроса ради детального экрана нет**: используется RTC-кеш (включая прогноз и ночной минимум).
-- 5-й экран показывает прогноз на **3 дня вперед (завтра + 2 дня)**, поэтому API запрашивается с `forecast_days=4`.
-- Для 4-го экрана “Ночью” минимум считается из `hourly` в окне `21:00..08:59`.
+- **`WEATHER_BUTTON_PIN` (GPIO4)** → GND: wakeup / показ деталей.
+- **`OTA_BUTTON_PIN` (GPIO2)** → просмотр OTA changelog / длинное удержание — установка.
+- `kWeatherDetailScreenCount = 7`; повторного HTTP нет — только RTC-кеш.
+- Для прогноза на 3 дня вперёд API с `forecast_days=4`; ночной минимум — hourly `21:00..08:59`.
 
-### OTA (web)
-- OTA реализован в `WebConfigServer.h`: endpoint `/ota`.
-- Предпроверки: только setup mode, наличие OTA partition, батарея выше `OTA_MIN_BATTERY_V`, подтверждение AP пароля.
-- Для OTA загружается `Celsius.ino.bin` (application image), не bootloader/partitions/merged.
+### OTA (web + AutoOTA)
+- Web OTA: `/ota` в setup mode; проверки OTA-partition, батареи, пароля AP; заливается application `.bin`.
+- AutoOTA: манифест `project.json`; индикатор на главном экране; ручное подтверждение через GPIO2.
 
-### Ограничение по времени суток
-- В `runCycle()` погодные обновления выполняются только если:
-  - `settings.weatherEnabled == true`
-  - `timeValid == true`
-  - `!night` (вне night mode)
-  - интервал обновления не истёк: `shouldUpdateWeather(local, settings.weatherUpdateHours)`
+### Ограничение сетевого цикла
+В `runCycle()` WiFi для NTP/погоды/AutoOTA только если:
+- `timeValid`, `workdayEnabled`, `!night`,
+- `shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled)`.
 
-### WiFi в процессе погоды
-- Перед HTTP запросом WiFi должен быть подключён.
-- После `fetchOutdoorTemperature()` выполняется:
-  - `WiFi.disconnect(true)`
-  - `WiFi.mode(WIFI_OFF)`
-  - переход в low-power.
+Погода внутри сеанса — дополнительно при `settings.weatherEnabled`.
+
+### WiFi в сетевом цикле
+- Подключение STA → NTP → AutoOTA → погода (опционально) → `WiFi.disconnect(true)` + `WIFI_OFF` + low CPU.
 
 ### Debug
-- `WeatherAPI.h` печатает подробности в Serial:
-  - URL/длину,
-  - HTTP code,
-  - тело ответа,
-  - ключи JSON,
-  - значения sensor/value, усреднение.
-- На OLED эти же этапы частично отображаются через `logToDisplay()` (только если включён `settings.showDebugCodes`).
+- Serial в `WeatherAPI.h` (URL, HTTP, JSON).
+- OLED — только при `settings.showDebugCodes` через `logToDisplay`.
 
-## Отображение на OLED
-### Рисование
-- Дисплей работает через `GyverOLED` и совместимый враппер `OledDisplayCompat`.
-- В `drawClock(...)` выполняется:
-  - `display.clearDisplay()`,
-  - отрисовка индикатора батареи,
-  - отрисовка даты/дня недели (в одной строке),
-  - отрисовка времени (крупный шрифт),
-  - отрисовка outdoor (если включено и есть данные),
-  - отрисовка indoor (tempC/hum/давление BMP280) от AHT20+BMP280,
-  - `display.display()`,
-  - сохранение буфера в RTC для восстановления на следующее пробуждение.
-- Экран подробной погоды (см. `WeatherDetailScreens.h`) — отдельный полноэкранный кадр на 128×64; координаты подгонялись под реальный модуль.
+## Отображение на OLED (`128x64`)
+### Рисование (`drawClock`)
+- GyverOLED + `OledDisplayCompat`.
+- Верх: weekday / дата / иконка OTA (если есть) / батарея.
+- Крупное время `HH`/`MM` с разделителем из двух `fillRect`.
+- Низ: outdoor temp (если есть) | **пиктограмма домика** + indoor `tempC` | влажность `%`.
+- Ориентация BMI160 — перед отрисовкой (и повтор после draw при смене).
+- Детальная погода — отдельные полноэкранные кадры (`WeatherDetailScreens.h`).
 
 ### Батарея
-- Отрисовка сейчас сделана как иконка “телефонного” типа:
-  - контур корпуса + «носик»,
-  - заполнение по уровню (пропорционально `bars`).
-- Иконка привязана к правому верхнему краю (через `display.width()`).
-
-### Дата и день недели
-- В текущей разметке выполнено “дата + день недели в одной строке”: день недели выводится сразу после даты.
-
-### Формат времени (крупный)
-- На основном экране крупное время рисуется раздельно как `HH` и `MM`.
-- Разделитель между ними сделан не символом `:`, а двумя маленькими `fillRect(...)`, центрированными между блоками часов и минут.
+- Иконка «телефонного» типа у правого верхнего края.
 
 ## Последовательность работы на устройстве
 ### setup()
-1. Инициализация Serial.
-2. Подготовка LED_PIN / проверка аппаратного сброса (GPIO0 замкнут).
-3. I2C / OLED init.
-4. Инициализация AHT20 и BMP280 (I²C).
-5. `loadSettings()` (EEPROM).
-6. Если WiFi настроек нет — `startConfigMode()` и ожидание в режиме веб-сервера.
-7. Иначе выполняется `runCycle()` и затем deep sleep.
+1. Serial, GPIO0 reset check, I2C/OLED.
+2. Indoor sensors по `tempSensorType`; опционально BMI160.
+3. `loadSettings()` (EEPROM).
+4. Нет WiFi → SoftAP config mode.
+5. Невалидное время → первичная `ntpSync()` (при фейле — setup mode).
+6. `runCycle()` → deep sleep (таймер + GPIO4 wake).
 
 ### loop()
-- В обычном режиме почти ничего не делает (устройство выходит из deep sleep в setup()).
-- В setup mode обрабатывает HTTP клиентов.
+- Config mode: `server.handleClient()`.
+- Иначе unused (работа через wake → setup).
 
 ## Практика разработки (рекомендации агенту)
-1. Перед любым изменением:
-   - прочитай `AGENTS.md`,
-   - проверь, под какую ветку/экран ты пишешь код.
-2. **`ROM_VERSION`**: при правках скетча не повышай версию сам; при необходимости новой версии — согласуй с пользователем (см. **IMPORTANT**, пункт 3).
-3. Если добавляешь сетевые функции:
-   - включай WiFi только на время операции,
-   - не забывай отключать `WiFi.mode(WIFI_OFF)` после выполнения.
-4. Если добавляешь новую отладку:
-   - предпочти `Serial.printf` (для точной диагностики),
-   - OLED дебаг включай только при `settings.showDebugCodes` через `logToDisplay`.
-5. После правок скетча:
-   - проверь компиляцию в Arduino IDE,
-   - проверь, что deep sleep и отрисовка не “ломаются” координатами/ориентацией.
-6. Отладка падений:
-   - сообщения загрузчика ESP при старте/ребуте — нормальны,
-   - `Guru Meditation Error` / `Load access fault` — всегда авария, не норма; разбирать через Exception Decoder/addr2line.
-
+1. Перед изменением: перечитай `AGENTS.md`, выбери ветку/экран.
+2. **`ROM_VERSION` / `project.json`**: не bump самостоятельно; при запросе пользователя — согласовать точную строку/тип bump (или следовать явному «апни»).
+3. Сетевые функции: WiFi только на время операции, затем `WIFI_OFF`.
+4. OLED-дебаг только через `showDebugCodes` / `logToDisplay`.
+5. После правок: компиляция в Arduino IDE с **достаточной** partition scheme; проверить sleep и координаты.
+6. Падения: `Guru Meditation` / access fault — через Exception Decoder/addr2line.

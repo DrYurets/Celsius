@@ -2,7 +2,7 @@
 * Celsius Clock (ESP32-C3)
 * https://github.com/DrYurets/Celsius/tree/aht20bmp280
 * 
-* Date: 05.05.2026
+* Date: 13.07.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -36,7 +36,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.8"
+#define ROM_VERSION "A1.4.9"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -286,7 +286,7 @@ struct DeviceSettings {
   float weatherLatitude;         // широта для Open-Meteo
   float weatherLongitude;        // долгота для Open-Meteo
   char weatherApiUrl[WEATHER_API_URL_BUF_SIZE];  // URL API для получения погоды
-  uint8_t weatherUpdateHours;    // периодичность обновления погоды в часах
+  uint8_t weatherUpdateHours;    // интервал NTP + погоды в часах (активный режим)
   uint8_t weatherScreenSeconds;  // длительность экрана деталей погоды по кнопке
   uint8_t tempSensorType;        // выбранный датчик температуры/влажности
   bool bmi160Enabled;            // BMI160: ориентация экрана по акселерометру (раз в минуту в runCycle)
@@ -1348,6 +1348,14 @@ static void drawOtaAvailableIcon() {
   display.fillRect(x + 4, y - 1, 1, 1, SSD1306_WHITE);
 }
 
+// Пиктограмма домика для внутренней температуры (~7x7 px)
+static void drawHomeIcon(int16_t x, int16_t y) {
+  display.fillRect(x + 3, y, 1, 1, SSD1306_WHITE);
+  display.fillRect(x + 2, y + 1, 3, 1, SSD1306_WHITE);
+  display.fillRect(x + 1, y + 2, 5, 1, SSD1306_WHITE);
+  display.drawRect(x + 1, y + 3, 5, 4, SSD1306_WHITE);
+}
+
 /*
 * Вывод на экран
 */
@@ -1426,7 +1434,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   //display.drawLine(0, 48, 128, 48, SSD1306_WHITE);
 
   display.setTextSize(1);
-  // Наружная температура (если включена и доступна)
+  // Наружная температура (если доступна)
   if (!isnan(outdoorTemperature)) {
     int16_t outX = 12;
     if (outdoorTemperature > 0) {
@@ -1440,11 +1448,15 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
     display.print(outBuf);
     drawDegreeMark(outX + (int16_t)strlen(outBuf) * 6 + 1, 55);
   }
-  display.setCursor(52, 56);
+  // Внутренняя температура + влажность
+  const int16_t homeX = 41;
+  drawHomeIcon(homeX, 56);
+  const int16_t inX = 52;
+  display.setCursor(inX, 56);
   char inBuf[8];
   snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
-  display.print(inBuf);  // температура внутри
-  drawDegreeMark(52 + (int16_t)strlen(inBuf) * 6 + 1, 55);
+  display.print(inBuf);
+  drawDegreeMark(inX + (int16_t)strlen(inBuf) * 6 + 1, 55);
   display.setCursor(78, 56);
   display.printf("%d%%", (int)hum);  // влажность
   display.display();
@@ -1612,8 +1624,8 @@ uint32_t runCycle() {
   // Ориентацию по BMI160 читаем не здесь, а непосредственно перед отрисовкой: до drawClock()
   // может уйти много времени на WiFi/NTP/погоду — иначе переворот «после пробуждения» не попадает в выборку.
 
-  // Обновление данных о погоде (только если включено, не ночной режим и прошло достаточно времени)
-  if (timeValid && workdayEnabled && !night && shouldUpdateWeather(local, settings.weatherUpdateHours)) {
+  // NTP + погода по одному интервалу (weatherUpdateHours), только в активном дневном режиме
+  if (timeValid && workdayEnabled && !night && shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled)) {
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
 
@@ -1645,8 +1657,9 @@ uint32_t runCycle() {
     snprintf(detail, sizeof(detail), "Final st=%d", wifiStatus);
     logToDisplay(CODE_WEATHER_FETCH, detail);
 
+    bool ntpOk = false;
     if (wifiStatus == WL_CONNECTED) {
-      ntpSyncOverConnectedWiFi();
+      ntpOk = ntpSyncOverConnectedWiFi();
       local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
       local = applyTimeCorrection(local, lastSyncLocalEpoch);
       timeValid = hasValidTime(local);
@@ -1654,23 +1667,22 @@ uint32_t runCycle() {
         localtime_r(&local, &ti);
       }
       tryAutoOtaUpdate(local, timeValid, night, workdayEnabled);
-      bool success = fetchOutdoorTemperature(settings.weatherApiUrl, WEATHER_SOURCE_OPEN_METEO);
-      if (success) {
-        lastWeatherUpdate = local;  // та же шкала, что в shouldUpdateWeather() (не time(nullptr) — libc не синхронизирован с storedEpoch)
-        snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
-        logToDisplay(CODE_WEATHER_OK, detail);
-      } else {
-        logToDisplay(CODE_WEATHER_ERROR);
-        // Обновляем время последней попытки даже при ошибке, чтобы не пытаться каждую минуту
-        // shouldUpdateWeather() использует меньший интервал (5 минут) для повторных попыток при ошибке
-        lastWeatherUpdate = local;
+      if (settings.weatherEnabled) {
+        bool success = fetchOutdoorTemperature(settings.weatherApiUrl, WEATHER_SOURCE_OPEN_METEO);
+        if (success) {
+          snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
+          logToDisplay(CODE_WEATHER_OK, detail);
+        } else {
+          logToDisplay(CODE_WEATHER_ERROR);
+        }
       }
     } else {
       snprintf(detail, sizeof(detail), "Status=%d", wifiStatus);
       logToDisplay(CODE_WEATHER_WIFI_FAIL, detail);
-      // Обновляем время последней попытки даже при ошибке WiFi
-      lastWeatherUpdate = local;
     }
+
+    lastNetworkUpdate = local;
+    lastNetworkNtpOk = ntpOk;
 
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);

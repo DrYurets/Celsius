@@ -133,8 +133,10 @@ String getConfigPage() {
   html += "<div class='checkbox-label'><input type='checkbox' name='wdSat' " + String((weekdaysMask & (1U << 5)) ? "checked" : "") + "><label>Sat</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='wdSun' " + String((weekdaysMask & (1U << 6)) ? "checked" : "") + "><label>Su</label></div>";
 
-  html += "<h2>NTP Sync</h2>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Time is synced automatically with every weather update.</p>";
+  html += "<h2>Time and Network Sync</h2>";
+  html += "<label>Update interval (hours):</label>";
+  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>NTP time sync runs on this interval in active daytime mode (work days, not night). Weather is fetched in the same WiFi session (1-24 h).</p>";
 
   html += "<h2>Time Correction</h2>";
   html += "<label>Timezone:</label>";
@@ -184,11 +186,9 @@ String getConfigPage() {
   html += "<label>Longitude:</label>";
   html += "<input type='number' name='weatherLongitude' min='-180' max='180' step='0.0001' value='" + String(settings.weatherLongitude, 4) + "' required style='margin-bottom: 10px;'>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Open-Meteo URL is generated automatically from coordinates.</p>";
-  html += "<label>Update interval (hours):</label>";
-  html += "<input type='number' name='weatherUpdateHours' min='1' max='24' value='" + String(settings.weatherUpdateHours) + "' required style='margin-bottom: 10px;'>";
   html += "<label>Weather screen timeout (sec):</label>";
   html += "<input type='number' name='weatherScreenSeconds' min='1' max='60' value='" + String(settings.weatherScreenSeconds) + "' required style='margin-bottom: 10px;'>";
-  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>How often to fetch weather data (1-24 hours). Updates only when display is on.</p>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>GPIO4 short to GND: wake + show cached weather details (no extra HTTP).</p>";
   html += "</div>";
   html += "<h2>Auto OTA</h2>";
   html += "<div class='checkbox-label'><input type='checkbox' name='autoOtaEnabled' " + String(settings.autoOtaEnabled ? "checked" : "") + "><label>Enable automatic firmware updates</label></div>";

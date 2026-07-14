@@ -37,7 +37,8 @@ static inline int32_t weatherJsonIntOrNeg1(JsonObject obj, const char *key) {
 // Переменные для хранения температуры
 RTC_DATA_ATTR float outdoorTemperature = NAN;
 RTC_DATA_ATTR float previousOutdoorTemperature = NAN;
-RTC_DATA_ATTR time_t lastWeatherUpdate = 0;
+RTC_DATA_ATTR time_t lastNetworkUpdate = 0;   // последний WiFi-сеанс (NTP + опционально погода)
+RTC_DATA_ATTR bool lastNetworkNtpOk = true;   // короткий интервал повтора при ошибке NTP
 RTC_DATA_ATTR float weatherPressureHpa = NAN;
 RTC_DATA_ATTR float weatherHumidityPct = NAN;
 RTC_DATA_ATTR float weatherWindSpeedMs = NAN;
@@ -449,22 +450,20 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
   }
 }
 
-// Функция для проверки необходимости обновления
-bool shouldUpdateWeather(time_t currentTime, uint8_t updateHours) {
-  if (lastWeatherUpdate == 0) {
-    return true;  // Первое обновление
+// Интервал NTP + погоды в активном режиме, updateHours — из админки (1..24 ч).
+bool shouldUpdateNetwork(time_t currentTime, uint8_t updateHours, bool weatherEnabled) {
+  if (lastNetworkUpdate == 0) {
+    return true;
   }
-  // Минимум 1 час, иначе при updateHours==0 (например из старого EEPROM) обновлялось бы каждый цикл (каждую минуту)
   if (updateHours == 0 || updateHours > 24) {
     updateHours = 1;
   }
   uint32_t updatePeriodSec = (uint32_t)updateHours * 3600UL;
-  // Если последнее обновление было успешным (температура валидна), используем полный период (часы)
-  // Если последнее обновление было неудачным (температура NaN), используем меньший период (5 минут) для повторных попыток
-  uint32_t period = isnan(outdoorTemperature) ? 300UL : updatePeriodSec;  // 300 секунд = 5 минут для повторных попыток
-  time_t delta = currentTime - lastWeatherUpdate;
+  bool needShortRetry = !lastNetworkNtpOk || (weatherEnabled && isnan(outdoorTemperature));
+  uint32_t period = needShortRetry ? 300UL : updatePeriodSec;
+  time_t delta = currentTime - lastNetworkUpdate;
   if (delta < 0) {
-    return true;  // время откатилось (NTP) — не блокируем обновление
+    return true;
   }
   return (uint32_t)delta >= period;
 }
