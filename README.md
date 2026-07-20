@@ -148,7 +148,7 @@ Root file `settings.json` contains baseline defaults for provisioning and mass s
 
 Required Arduino libraries:
 
-- Adafruit_SH110X (ветка `128x128`, SH1107)
+- Adafruit_SH110X + U8g2_for_Adafruit_GFX (ветка `128x128`, SH1107, кириллица)
 - GyverOLED (ветки `main` / `128x64`)
 - NTPClient
 - ArduinoJson

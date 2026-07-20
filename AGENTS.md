@@ -43,7 +43,7 @@
 ## Поддерживаемые варианты экрана (ветки)
 - `main` — дисплей **128×32** (портретная ориентация), SSD1306 / GyverOLED (legacy).
 - `128x64` — дисплей **128×64** (SSD1306), GyverOLED, альбомная ориентация.
-- `128x128` — дисплей **GME128128-01-IIC ver2.0 / SH1107 128×128**, драйвер **Adafruit_SH110X** (`Adafruit_SH1107`), обёртка `OledDisplayCompat` в `Celsius.ino`. I2C: SDA=8, SCL=9, адрес `0x3C` (при пустом экране попробовать `0x3D`).
+- `128x128` — дисплей **GME128128-01-IIC ver2.0 / SH1107 128×128**, драйвер **Adafruit_SH110X** (`Adafruit_SH1107`) + **U8g2_for_Adafruit_GFX** (кириллица), обёртка `OledDisplayCompat` в `Celsius.ino`. I2C: SDA=8, SCL=9, адрес `0x3C` (при пустом экране попробовать `0x3D`).
 
 При разработке нового функционала важно учитывать координаты/ориентацию/размеры под конкретную ветку. Сначала выбери правильную ветку.
 
@@ -53,11 +53,11 @@
 После смены схемы нужна **полная прошивка по USB** (желательно с Erase Flash), не только OTA.
 
 ### Checklist прошивки ветки `128x128` (SH1107 / Adafruit_SH110X)
-1. В Arduino IDE: **Adafruit SH110X**, **Adafruit GFX**, **Adafruit BusIO**.
+1. В Arduino IDE: **Adafruit SH110X**, **Adafruit GFX**, **Adafruit BusIO**, **U8g2_for_Adafruit_GFX** (и шрифты из неё; полный U8g2 для текста не нужен).
 2. Board: ESP32C3; Partition Scheme: **Minimal SPIFFS (1.9MB APP with OTA)**.
 3. Драйвер: `Adafruit_SH1107(128, 128, &Wire, -1)`. Если экран пустой/шум — проверить адрес `0x3C` vs `0x3D`.
-4. Стандартный шрифт Adafruit без кириллицы (UTF-8 RU на экране погоды пока не рисуется как в Gyver/U8g2).
-5. Проверить: init, главный экран, flip BMI160, deep sleep/wake, экраны погоды/OTA.
+4. Кириллица: `U8g2_for_Adafruit_GFX` в `OledDisplayCompat` (`6x13`/`10x20` cyrillic, крупные цифры `logisoso*_tn`).
+5. Проверить: init, главный экран, RU-подписи погоды, flip BMI160, deep sleep/wake, OTA.
 
 ## Архитектура времени
 ### NTP sync
@@ -143,7 +143,7 @@
 
 ## Отображение на OLED (`128x128` / SH1107)
 ### Рисование (`drawClock`)
-- Adafruit_SH1107 + `OledDisplayCompat` (API совместим с прежним кодом экранов).
+- Adafruit_SH1107 + `U8g2_for_Adafruit_GFX` через `OledDisplayCompat` (UTF-8/кириллица).
 - Верх: weekday / дата / иконка OTA / батарея.
 - Крупное время около `y≈44`, низ (`y≈112`): outdoor | домик + indoor | влажность.
 - Ориентация BMI160 — `setRotation(0/2)`.

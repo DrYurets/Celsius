@@ -13,6 +13,7 @@
 #define SH110X_NO_SPLASH
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
+#include <U8g2_for_Adafruit_GFX.h>
 #include <Adafruit_SHT31.h>
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_BMP280.h>
@@ -144,8 +145,7 @@
 
 class OledDisplayCompat {
  public:
-  // GME128128 / SH1107 128×128 через Adafruit_SH110X.
-  // Wire.begin(SDA,SCL) до begin(); адрес обычно 0x3C (иначе 0x3D).
+  // SH1107: Adafruit_SH110X (буфер/графика) + U8g2_for_Adafruit_GFX (UTF-8/кириллица).
   OledDisplayCompat()
       : oled_(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, 400000, 100000) {}
 
@@ -154,9 +154,12 @@ class OledDisplayCompat {
       return false;
     }
     oled_.clearDisplay();
-    oled_.setTextColor(SH110X_WHITE);
-    oled_.setTextSize(1);
-    oled_.cp437(true);
+    u8g_.begin(oled_);
+    u8g_.setFontMode(1);  // transparent
+    u8g_.setFontDirection(0);
+    u8g_.setForegroundColor(SH110X_WHITE);
+    u8g_.setBackgroundColor(SH110X_BLACK);
+    setTextSize(1);
     oled_.display();
     return true;
   }
@@ -164,47 +167,85 @@ class OledDisplayCompat {
   void clearDisplay() { oled_.clearDisplay(); }
   void display() { oled_.display(); }
 
-  void setTextSize(uint8_t size) { oled_.setTextSize(constrain((int)size, 1, 4)); }
-  void setTextColor(uint16_t) { oled_.setTextColor(SH110X_WHITE); }
+  void setTextSize(uint8_t size) {
+    textSize_ = (uint8_t)constrain((int)size, 1, 4);
+    applyFont();
+  }
+  void setTextColor(uint16_t) {
+    u8g_.setForegroundColor(SH110X_WHITE);
+  }
   void setRotation(uint8_t r) { oled_.setRotation(r); }
 
   /** 180° через Adafruit_GFX setRotation(2). */
   void setUpsideDown(bool upsideDown) { oled_.setRotation(upsideDown ? 2 : 0); }
 
-  void setCursor(int16_t x, int16_t y) { oled_.setCursor(x, y); }
+  /** Курсор в координатах «верхний левый» (как у Adafruit/Gyver). */
+  void setCursor(int16_t x, int16_t y) {
+    cursorX_ = x;
+    cursorY_ = y;
+    syncU8gCursor();
+  }
 
   int16_t width() const { return SCREEN_WIDTH; }
   int16_t height() const { return SCREEN_HEIGHT; }
 
   int16_t getTextWidth(const char *s) {
-    if (!s) {
-      return 0;
-    }
-    int16_t x1, y1;
-    uint16_t w, h;
-    oled_.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
-    return (int16_t)w;
+    applyFont();
+    return u8g_.getUTF8Width(s ? s : "");
   }
 
-  size_t print(const char *s) { return oled_.print(s ? s : ""); }
-  size_t print(const String &s) { return oled_.print(s); }
-  size_t print(char c) { return oled_.print(c); }
-  size_t print(int v) { return oled_.print(v); }
-  size_t print(unsigned int v) { return oled_.print(v); }
-  size_t print(long v) { return oled_.print(v); }
-  size_t print(unsigned long v) { return oled_.print(v); }
-  size_t print(float v) { return oled_.print(v); }
-  size_t println(const char *s) { return oled_.println(s ? s : ""); }
-  size_t println(const String &s) { return oled_.println(s); }
-  size_t println(int v) { return oled_.println(v); }
-  size_t println(unsigned int v) { return oled_.println(v); }
+  size_t print(const char *s) { return drawText(s, false); }
+  size_t print(const String &s) { return drawText(s.c_str(), false); }
+  size_t print(char c) {
+    char buf[2] = {c, '\0'};
+    return drawText(buf, false);
+  }
+  size_t print(int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", v);
+    return drawText(buf, false);
+  }
+  size_t print(unsigned int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", v);
+    return drawText(buf, false);
+  }
+  size_t print(long v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%ld", v);
+    return drawText(buf, false);
+  }
+  size_t print(unsigned long v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%lu", v);
+    return drawText(buf, false);
+  }
+  size_t print(float v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%g", (double)v);
+    return drawText(buf, false);
+  }
+  size_t println(const char *s) { return drawText(s, true); }
+  size_t println(const String &s) { return drawText(s.c_str(), true); }
+  size_t println(int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", v);
+    return drawText(buf, true);
+  }
+  size_t println(unsigned int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", v);
+    return drawText(buf, true);
+  }
   template <typename T>
   size_t print(const T &v) {
-    return oled_.print(v);
+    String s(v);
+    return drawText(s.c_str(), false);
   }
   template <typename T>
   size_t println(const T &v) {
-    return oled_.println(v);
+    String s(v);
+    return drawText(s.c_str(), true);
   }
 
   int printf(const char *fmt, ...) {
@@ -213,7 +254,7 @@ class OledDisplayCompat {
     va_start(args, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    oled_.print(buf);
+    drawText(buf, false);
     return n;
   }
 
@@ -252,7 +293,54 @@ class OledDisplayCompat {
   }
 
  private:
+  void applyFont() {
+    switch (textSize_) {
+      case 1:
+        u8g_.setFont(u8g2_font_6x13_t_cyrillic);
+        break;
+      case 2:
+        u8g_.setFont(u8g2_font_10x20_t_cyrillic);
+        break;
+      case 3:
+        u8g_.setFont(u8g2_font_logisoso22_tn);
+        break;
+      default:
+        u8g_.setFont(u8g2_font_logisoso32_tn);
+        break;
+    }
+  }
+
+  void syncU8gCursor() {
+    applyFont();
+    // U8g2: Y = baseline; снаружи держим top-left как у Adafruit.
+    u8g_.setCursor(cursorX_, (int16_t)(cursorY_ + u8g_.getFontAscent()));
+  }
+
+  int16_t lineHeight() {
+    applyFont();
+    return (int16_t)(u8g_.getFontAscent() - u8g_.getFontDescent() + 1);
+  }
+
+  size_t drawText(const char *s, bool newline) {
+    if (!s) {
+      s = "";
+    }
+    syncU8gCursor();
+    size_t n = u8g_.print(s);
+    cursorX_ = u8g_.getCursorX();
+    if (newline) {
+      cursorX_ = 0;
+      cursorY_ = (int16_t)(cursorY_ + lineHeight());
+      syncU8gCursor();
+    }
+    return n;
+  }
+
   Adafruit_SH1107 oled_;
+  U8G2_FOR_ADAFRUIT_GFX u8g_;
+  int16_t cursorX_ = 0;
+  int16_t cursorY_ = 0;
+  uint8_t textSize_ = 1;
   bool waitContrast_ = false;
 };
 
