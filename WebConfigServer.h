@@ -616,20 +616,22 @@ void updateConfigModeDisplay() {
   applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
-  display.setCursor(12, 0);
+  display.setCursor(12, 8);
   display.println("--- НАСТРОЙКИ ---");
-  display.setCursor(0, 16);
+  display.setCursor(0, 32);
   display.print("WiFi: ");
   display.print(AP_SSID);
-  display.setCursor(0, 28);
+  display.setCursor(0, 48);
   display.print("Password: ");
   display.print(AP_PASSWORD);
-  display.setCursor(0, 40);
+  display.setCursor(0, 64);
   display.print("IP: ");
   display.print(WiFi.softAPIP());
-  display.setCursor(0, 56);
+  display.setCursor(0, 88);
   display.print("ROM: ");
   display.println(ROM_VERSION);
+  display.setCursor(0, 108);
+  display.print("OLED: SH1107 128x128");
   display.display();
 }
 

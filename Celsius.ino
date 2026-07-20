@@ -2,7 +2,7 @@
 * Celsius Clock (ESP32-C3)
 * https://github.com/DrYurets/Celsius/tree/aht20bmp280
 * 
-* Date: 13.07.2026
+* Date: 20.07.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstring>
-#include <GyverOLED.h>
+#define SH110X_NO_SPLASH
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
 #include <Adafruit_SHT31.h>
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_BMP280.h>
@@ -50,8 +52,8 @@
 #define AHT20_ADDR 0x38
 #define BMP280_ADDR 0x76
 #define BMP280_ADDR_ALT 0x77
-#define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
-#define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
+#define SCREEN_WIDTH 128   // GME128128-01-IIC / SH1107
+#define SCREEN_HEIGHT 128
 #define LED_PIN 0
 #define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
@@ -83,7 +85,7 @@
 #define OTA_MIN_BATTERY_V 3.05f
 #define SHOW_DEBUG_CODES 0
 #define AUTOOTA_ENABLED 1
-#define AUTOOTA_BRANCH "128x64"  // OTA channel: branch with matching hardware layout
+#define AUTOOTA_BRANCH "128x128"  // OTA channel: branch with matching hardware layout
 #define AUTOOTA_MANIFEST_URL "https://raw.githubusercontent.com/DrYurets/Celsius/" AUTOOTA_BRANCH "/project.json"
 #define AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT 24
 #define AUTOOTA_CHECK_INTERVAL_HOURS_MIN 1
@@ -142,26 +144,49 @@
 
 class OledDisplayCompat {
  public:
-  OledDisplayCompat() : oled_(OLED_ADDR) {}
+  // GME128128 / SH1107 128×128 через Adafruit_SH110X.
+  // Wire.begin(SDA,SCL) до begin(); адрес обычно 0x3C (иначе 0x3D).
+  OledDisplayCompat()
+      : oled_(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1, 400000, 100000) {}
 
-  bool begin(int, int) {
-    oled_.init();
+  bool begin(int, int addr) {
+    if (!oled_.begin((uint8_t)addr, true)) {
+      return false;
+    }
+    oled_.clearDisplay();
+    oled_.setTextColor(SH110X_WHITE);
+    oled_.setTextSize(1);
+    oled_.cp437(true);
+    oled_.display();
     return true;
   }
-  void clearDisplay() { oled_.clear(); }
-  void display() { oled_.update(); }
-  void setTextSize(uint8_t size) { oled_.setScale(constrain((int)size, 1, 4)); }
-  void setTextColor(uint16_t) {}
-  void setRotation(uint8_t) {}
-  /** 180°: одновременный flip по H и V (GyverOLED / SSD1306). */
-  void setUpsideDown(bool upsideDown) {
-    oled_.flipH(upsideDown);
-    oled_.flipV(upsideDown);
-  }
-  void setCursor(int16_t x, int16_t y) { oled_.setCursorXY(x, y); }
-  int16_t width() const { return SCREEN_WIDTH; }
 
-  size_t print(const char *s) { return oled_.print(s); }
+  void clearDisplay() { oled_.clearDisplay(); }
+  void display() { oled_.display(); }
+
+  void setTextSize(uint8_t size) { oled_.setTextSize(constrain((int)size, 1, 4)); }
+  void setTextColor(uint16_t) { oled_.setTextColor(SH110X_WHITE); }
+  void setRotation(uint8_t r) { oled_.setRotation(r); }
+
+  /** 180° через Adafruit_GFX setRotation(2). */
+  void setUpsideDown(bool upsideDown) { oled_.setRotation(upsideDown ? 2 : 0); }
+
+  void setCursor(int16_t x, int16_t y) { oled_.setCursor(x, y); }
+
+  int16_t width() const { return SCREEN_WIDTH; }
+  int16_t height() const { return SCREEN_HEIGHT; }
+
+  int16_t getTextWidth(const char *s) {
+    if (!s) {
+      return 0;
+    }
+    int16_t x1, y1;
+    uint16_t w, h;
+    oled_.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+    return (int16_t)w;
+  }
+
+  size_t print(const char *s) { return oled_.print(s ? s : ""); }
   size_t print(const String &s) { return oled_.print(s); }
   size_t print(char c) { return oled_.print(c); }
   size_t print(int v) { return oled_.print(v); }
@@ -169,14 +194,18 @@ class OledDisplayCompat {
   size_t print(long v) { return oled_.print(v); }
   size_t print(unsigned long v) { return oled_.print(v); }
   size_t print(float v) { return oled_.print(v); }
-  size_t println(const char *s) { return oled_.println(s); }
+  size_t println(const char *s) { return oled_.println(s ? s : ""); }
   size_t println(const String &s) { return oled_.println(s); }
   size_t println(int v) { return oled_.println(v); }
   size_t println(unsigned int v) { return oled_.println(v); }
   template <typename T>
-  size_t print(const T &v) { return oled_.print(v); }
+  size_t print(const T &v) {
+    return oled_.print(v);
+  }
   template <typename T>
-  size_t println(const T &v) { return oled_.println(v); }
+  size_t println(const T &v) {
+    return oled_.println(v);
+  }
 
   int printf(const char *fmt, ...) {
     char buf[64];
@@ -189,13 +218,22 @@ class OledDisplayCompat {
   }
 
   void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
-    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_STROKE);
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawRect(x, y, w, h, SH110X_WHITE);
   }
   void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
-    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_FILL);
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.fillRect(x, y, w, h, SH110X_WHITE);
   }
   void drawBitmap(int16_t x, int16_t y, const uint8_t *bmp, int16_t w, int16_t h, uint16_t) {
-    oled_.drawBitmap(x, y, bmp, w, h, BITMAP_NORMAL, BUF_ADD);
+    if (!bmp || w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawBitmap(x, y, bmp, w, h, SH110X_WHITE);
   }
 
   void ssd1306_command(uint8_t cmd) {
@@ -204,13 +242,17 @@ class OledDisplayCompat {
       waitContrast_ = false;
       return;
     }
-    if (cmd == 0x81) waitContrast_ = true;
-    else if (cmd == 0xAF) oled_.setPower(true);
-    else if (cmd == 0xAE) oled_.setPower(false);
+    if (cmd == 0x81) {
+      waitContrast_ = true;
+    } else if (cmd == SH110X_DISPLAYON) {
+      oled_.oled_command(SH110X_DISPLAYON);
+    } else if (cmd == SH110X_DISPLAYOFF) {
+      oled_.oled_command(SH110X_DISPLAYOFF);
+    }
   }
 
  private:
-  GyverOLED<SSD1306_128x64, OLED_BUFFER> oled_;
+  Adafruit_SH1107 oled_;
   bool waitContrast_ = false;
 };
 
@@ -510,10 +552,10 @@ static void showOtaUpdateInfoScreen() {
     }
   }
 
-  const uint8_t firstPageLines = 3;
-  const uint8_t nextPageLines = 5;  // плотность ниже, чтобы строки на 2+ страницах не налезали
-  const int16_t firstPageLineStep = 10;
-  const int16_t nextPageLineStep = 12;
+  const uint8_t firstPageLines = 5;
+  const uint8_t nextPageLines = 8;
+  const int16_t firstPageLineStep = 12;
+  const int16_t nextPageLineStep = 13;
   uint8_t totalPages = 1;
   if (wrappedCount > firstPageLines) {
     uint8_t rem = (uint8_t)(wrappedCount - firstPageLines);
@@ -542,7 +584,7 @@ static void showOtaUpdateInfoScreen() {
       display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
       lineFrom = 0;
       rowCount = firstPageLines;
-      textY0 = 30;
+      textY0 = 40;
       lineStep = firstPageLineStep;
     } else {
       lineFrom = (uint8_t)(firstPageLines + (pageIdx - 1U) * nextPageLines);
@@ -664,8 +706,8 @@ static bool runManualOtaInstall() {
   snprintf(tbuf, sizeof(tbuf), "t=%lus", (unsigned long)((millis() - t0) / 1000UL));
   display.setCursor(0, 24);
   display.println(tbuf);
-  display.drawRect(0, 56, 128, 7, SSD1306_WHITE);
-  display.fillRect(1, 57, 126, 5, SSD1306_WHITE);
+  display.drawRect(0, 112, 128, 7, SSD1306_WHITE);
+  display.fillRect(1, 113, 126, 5, SSD1306_WHITE);
   display.display();
 
   bool ok = autoOta.updateNow();
@@ -700,7 +742,7 @@ static bool runManualOtaInstall() {
 static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs) {
   const uint32_t start = millis();
   const int16_t barX = 0;
-  const int16_t barY = 56;
+  const int16_t barY = 112;
   const int16_t barW = 128;
   const int16_t barH = 7;
   while ((uint32_t)(millis() - start) < holdMs) {
@@ -831,7 +873,6 @@ void logToDisplay(const char *code, const char *detail, uint16_t holdMs) {
   }
   setDisplayState(true);
   setBrightness(0x01);
-  display.setRotation(0);  // Горизонтальная ориентация для дебаг-кодов
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -845,7 +886,6 @@ void logToDisplay(const char *code, const char *detail, uint16_t holdMs) {
   if (holdMs > 0) {
     delay(holdMs);
   }
-  display.setRotation(1);  // Возвращаем вертикальную ориентацию
 }
 
 
@@ -1371,23 +1411,21 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   if (settings.showWeekday) {
     drawDayShort(wday, 0, topY);
   }
-  // 2) Дата (число.месяц) — по центру верхней строки (шрифт 1: ~6 px на символ)
+  // 2) Дата (число.месяц) — по центру верхней строки
   if (settings.showDate) {
     char dateBuf[8];
     snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d", d, mo);
-    const int16_t charW = 6;
-    const int16_t textW = charW * (int16_t)strlen(dateBuf);
+    display.setTextSize(1);
+    const int16_t textW = display.getTextWidth(dateBuf);
     const int16_t dateX = ((int16_t)display.width() - textW) / 2;
     display.setCursor(dateX, topY);
     display.print(dateBuf);
   }
-  // 3) Индикатор заряда — вверху справа (как раньше)
+  // 3) Индикатор заряда — вверху справа
   if (otaUpdateAvailable) {
     drawOtaAvailableIcon();
   }
   drawBattery(batBars);
-
-  //display.drawLine(0, 20, 128, 20, SSD1306_WHITE); // разделительная линия
 
   // Формат времени
   int displayH = h;
@@ -1398,67 +1436,55 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
   display.setTextSize(4);
 
-  // Подготовим строку времени для расчета ширины
   char lBuf[3], rBuf[3];
   snprintf(lBuf, sizeof(lBuf), "%02d", displayH);
   snprintf(rBuf, sizeof(rBuf), "%02d", m);
 
-  // Ширина символа шрифта размером 4: 6*4=24px
-  int charW = 6 * 4; // 24 px
-  int colonSpace = 16; // место между часами и минутами, чтобы хватило для квадратиков
-  int lLen = strlen(lBuf);
-  int rLen = strlen(rBuf);
-  int fullW = (lLen + rLen) * charW + colonSpace;
+  const int colonSpace = 16;
+  const int16_t fullW = (int16_t)(display.getTextWidth(lBuf) + display.getTextWidth(rBuf) + colonSpace);
+  const int screenW = (int)display.width();
+  const int startX = (screenW - fullW) / 2;
+  const int y = 44;  // центр по вертикали для 128×128
 
-  int screenW = (int)display.width();
-  int startX = (screenW - fullW) / 2;
-  int y = 20;
-
-  // Нарисовать часы
   display.setCursor(startX, y);
   display.print(lBuf);
 
-  // Нарисовать "двоеточие" из двух квадратов 3x3px с разносом 8px
-  int colonX = startX + lLen * charW + (colonSpace - 3) / 2;
-  int colonYtop = y + 6;          // немного ниже верхнего края цифр
-  int colonYbot = colonYtop + 3 + 8; // нижний квадрат с промежутком 8px
+  const int colonX = startX + display.getTextWidth(lBuf) + (colonSpace - 3) / 2;
+  const int colonYtop = y + 8;
+  const int colonYbot = colonYtop + 3 + 10;
 
   display.fillRect(colonX, colonYtop, 3, 3, SSD1306_WHITE);
   display.fillRect(colonX, colonYbot, 3, 3, SSD1306_WHITE);
 
-  // Нарисовать минуты
-  int minX = startX + lLen * charW + colonSpace;
+  const int minX = startX + display.getTextWidth(lBuf) + colonSpace;
   display.setCursor(minX, y);
   display.print(rBuf);
 
-  //display.drawLine(0, 48, 128, 48, SSD1306_WHITE);
-
   display.setTextSize(1);
+  const int16_t bottomY = 112;
   // Наружная температура (если доступна)
   if (!isnan(outdoorTemperature)) {
     int16_t outX = 12;
-    if (outdoorTemperature > 0) {
-      outX = 12;
-    } else {
-      outX = 9;  // оставляем место для минуса
+    if (outdoorTemperature <= 0) {
+      outX = 9;
     }
     char outBuf[8];
     snprintf(outBuf, sizeof(outBuf), "%d", (int)outdoorTemperature);
-    display.setCursor(outX, 56);
+    display.setCursor(outX, bottomY);
     display.print(outBuf);
-    drawDegreeMark(outX + (int16_t)strlen(outBuf) * 6 + 1, 55);
+    drawDegreeMark(outX + display.getTextWidth(outBuf) + 1, bottomY - 1);
   }
   // Внутренняя температура + влажность
   const int16_t homeX = 41;
-  drawHomeIcon(homeX, 56);
+  drawHomeIcon(homeX, bottomY);
   const int16_t inX = 52;
-  display.setCursor(inX, 56);
+  display.setCursor(inX, bottomY);
   char inBuf[8];
   snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
   display.print(inBuf);
-  drawDegreeMark(inX + (int16_t)strlen(inBuf) * 6 + 1, 55);
-  display.setCursor(78, 56);
-  display.printf("%d%%", (int)hum);  // влажность
+  drawDegreeMark(inX + display.getTextWidth(inBuf) + 1, bottomY - 1);
+  display.setCursor(78, bottomY);
+  display.printf("%d%%", (int)hum);
   display.display();
   displayBackupValid = false;
 }

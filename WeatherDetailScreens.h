@@ -130,7 +130,7 @@ inline void drawWeatherIcon(DisplayT &display,
 }
 
 /**
- * Одна страница подробной погоды (128×64, альбомная ориентация).
+ * Одна страница подробной погоды (128×128, SH1107).
  * screenIndex: 0..6.
  */
 template <typename DisplayT>
@@ -156,45 +156,44 @@ inline void drawWeatherDetailScreen(DisplayT &display,
   display.setTextColor(1);
 
   display.setTextSize(1);
-  display.setCursor(116, 56); // номер экрана
+  display.setCursor(116, 116);  // номер экрана
   display.print((int)(screenIndex + 1));
-  
 
   switch (screenIndex) {
     case 0: {
       display.setTextSize(1);
-      display.setCursor(0, 0);
+      display.setCursor(0, 4);
       display.print("Наружная температура");
 
       char tBuf[16];
       formatSignedTemp(tBuf, sizeof(tBuf), outdoorTemp);
       display.setTextSize(2);
-      display.setCursor(0, 12);
+      display.setCursor(0, 24);
       display.print(tBuf);
-      int16_t xAfterT = (int16_t)strlen(tBuf) * 12;
-      drawDegreeMark(display, xAfterT + 1, 14);
-      display.setCursor(xAfterT + 7, 12);
+      int16_t xAfterT = (int16_t)strlen(tBuf) * 10;
+      drawDegreeMark(display, xAfterT + 1, 26);
+      display.setCursor(xAfterT + 7, 24);
       display.print("С");
 
       display.setTextSize(1);
-      display.setCursor(0, 32);
+      display.setCursor(0, 64);
       display.print("Ощущается как");
       char fBuf[16];
       formatSignedTemp(fBuf, sizeof(fBuf), feelsLikeC);
       display.setTextSize(2);
-      display.setCursor(0, 44);
+      display.setCursor(0, 84);
       display.print(fBuf);
-      int16_t xAfterF = (int16_t)strlen(fBuf) * 12;
-      drawDegreeMark(display, xAfterF + 1, 46);
-      display.setCursor(xAfterF + 7, 44);
+      int16_t xAfterF = (int16_t)strlen(fBuf) * 10;
+      drawDegreeMark(display, xAfterF + 1, 86);
+      display.setCursor(xAfterF + 7, 84);
       display.print("С");
       break;
     }
     case 1: {
-      display.setCursor(0, 0);
+      display.setCursor(0, 4);
       display.print("Скорость ветра");
       display.setTextSize(2);
-      display.setCursor(10, 12);
+      display.setCursor(10, 24);
       if (isnan(windSpeedMs)) {
         display.print("--");
       } else {
@@ -204,7 +203,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print("м/с");
       }
       display.setTextSize(1);
-      display.setCursor(0, 32);
+      display.setCursor(0, 64);
       display.print("Направление ветра");
       {
         char dirLabel[16];
@@ -217,7 +216,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
           snprintf(dirLabel, sizeof(dirLabel), "--");
           degBuf[0] = '\0';
         }
-        constexpr int16_t kWindDirTextY = 42;
+        constexpr int16_t kWindDirTextY = 84;
         display.setTextSize(2);
         display.setCursor(0, kWindDirTextY);
         display.print(dirLabel);
@@ -226,22 +225,19 @@ inline void drawWeatherDetailScreen(DisplayT &display,
           display.print(degBuf);
         }
         if (!isnan(windDirDeg)) {
-          const int16_t chW = 12;  // как у остальных крупных цифр на экране (setTextSize(2))
+          const int16_t chW = 10;
           int16_t xAfter = (int16_t)utf8GlyphCount(dirLabel) * chW + chW + (int16_t)strlen(degBuf) * chW;
           drawDegreeMark(display, xAfter + 1, kWindDirTextY + 2);
         }
       }
 
       if (!isnan(windDirDeg)) {
-        // Центр правой свободной области (экран "Направление ветра"),
-        // чтобы стрелка была максимально по центру доступного пространства.
         const int16_t cx = 106;
-        const int16_t cy = 16;
+        const int16_t cy = 28;
         const float rad = windDirDeg * 0.0174532925f;
         const float vx = -sinf(rad);
         const float vy = cosf(rad);
-        // Стрелка вращается вокруг своего центра (cx, cy), а не вокруг "тупого" конца.
-        const float halfLen = 12.0f;
+        const float halfLen = 14.0f;
         const int16_t tailX = cx - (int16_t)lroundf(vx * halfLen);
         const int16_t tailY = cy - (int16_t)lroundf(vy * halfLen);
         const int16_t tipX = cx + (int16_t)lroundf(vx * halfLen);
@@ -260,10 +256,10 @@ inline void drawWeatherDetailScreen(DisplayT &display,
     }
     case 2:
     {
-      display.setCursor(0, 0);
+      display.setCursor(0, 4);
       display.print("Влажность воздуха");
       display.setTextSize(2);
-      display.setCursor(0, 12);
+      display.setCursor(0, 24);
       if (isnan(humidityPct)) {
         display.print("--");
       } else {
@@ -272,13 +268,13 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print(buf);
       }
       display.setTextSize(1);
-      display.setCursor(28, 18);
+      display.setCursor(32, 30);
       display.print("%");
 
-      display.setCursor(0, 32);
+      display.setCursor(0, 64);
       display.print("Атмосферное давление");
       display.setTextSize(2);
-      display.setCursor(0, 44);
+      display.setCursor(0, 84);
       if (isnan(pressureHpa)) {
         display.print("--");
       } else {
@@ -288,15 +284,15 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print(buf);
       }
       display.setTextSize(1);
-      display.setCursor(42, 50);
+      display.setCursor(48, 90);
       display.print("мм рт.ст");
       break;
     }
     case 3: {
-      display.setCursor(0, 0);
+      display.setCursor(0, 4);
       display.print("Текущая погода");
-      drawWeatherIcon(display, 7, 10, 1, currentWmoCode, windSpeedMs, false); // стр. 4: +5 px вправо
-      display.setCursor(42, 15);
+      drawWeatherIcon(display, 7, 22, 1, currentWmoCode, windSpeedMs, false);
+      display.setCursor(42, 28);
       display.print("Осадки: ");
       if (isnan(precipProbabilityPct)) {
         display.print("--");
@@ -307,10 +303,10 @@ inline void drawWeatherDetailScreen(DisplayT &display,
 
       float nightMin = nearestNightMinC;
       int32_t nightWmo = nearestNightWmoCode;
-      display.setCursor(42, 31);
+      display.setCursor(42, 56);
       display.print("Ночью:");
       int16_t nightIconX = 86;
-      display.setCursor(42, 48);
+      display.setCursor(42, 84);
       if (isnan(nightMin)) {
         display.print("--");
         nightIconX = 58;
@@ -319,42 +315,42 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         formatSignedIntTemp(nBuf, sizeof(nBuf), nightMin);
         display.print(nBuf);
         int16_t xAfter = 42 + (int16_t)strlen(nBuf) * 6;
-        drawDegreeMark(display, xAfter + 1, 48);
-        display.setCursor(xAfter + 7, 48);
+        drawDegreeMark(display, xAfter + 1, 84);
+        display.setCursor(xAfter + 7, 84);
         display.print("С");
         nightIconX = xAfter + 16;
       }
-      drawWeatherIcon(display, nightIconX, 40, 1, nightWmo, NAN, true); // night glyph
+      drawWeatherIcon(display, nightIconX, 76, 1, nightWmo, NAN, true);
       break;
     }
     case 4:
     case 5:
     default: {
-      uint8_t srcIdx = (uint8_t)(screenIndex - 3); // 1..3 => завтра, послезавтра, +3 день
+      uint8_t srcIdx = (uint8_t)(screenIndex - 3);
       uint8_t wd = (uint8_t)((baseTmWday + srcIdx) % 7);
 
-      display.setCursor(0, 0);
+      display.setCursor(0, 4);
       display.print("Прогноз: ");
       display.print(weekdayShortRuByTmWday(wd));
 
       int32_t code = dailyWmoCode ? dailyWmoCode[srcIdx] : -1;
       float dayWind = dailyWindDayMs ? dailyWindDayMs[srcIdx] : NAN;
       float dayPrecip = dailyPrecipDayPct ? dailyPrecipDayPct[srcIdx] : NAN;
-      drawWeatherIcon(display, 5, 12, 1, code, dayWind, false); // Meteocons glyph (+5 к X)
+      drawWeatherIcon(display, 5, 28, 1, code, dayWind, false);
 
       char dayBuf[8];
       char nightBuf[8];
       formatSignedIntTemp(dayBuf, sizeof(dayBuf), (dailyTempMaxC ? dailyTempMaxC[srcIdx] : NAN));
       formatSignedIntTemp(nightBuf, sizeof(nightBuf), (dailyTempMinC ? dailyTempMinC[srcIdx] : NAN));
 
-      display.setCursor(40, 16);
+      display.setCursor(40, 32);
       display.print("День/ночь");
-      display.setCursor(40, 28);
+      display.setCursor(40, 52);
       display.print(dayBuf);
       display.print("/");
       display.print(nightBuf);
 
-      display.setCursor(40, 40);
+      display.setCursor(40, 76);
       display.print("Ветер: ");
       if (isnan(dayWind)) display.print("--");
       else {
@@ -364,7 +360,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       }
       display.print("м/с");
 
-      display.setCursor(40, 56);
+      display.setCursor(40, 96);
       display.print("Осадки: ");
       if (isnan(dayPrecip)) display.print("--%");
       else {

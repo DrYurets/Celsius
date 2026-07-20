@@ -10,7 +10,7 @@
       "chipFamily": "ESP32-C3",
       "parts": [
         {
-          "path": "https://raw.githubusercontent.com/DrYurets/Celsius/128x64/build/esp32.esp32.esp32c3/Celsius.ino.bin",
+          "path": "https://raw.githubusercontent.com/DrYurets/Celsius/128x128/build/esp32.esp32.esp32c3/Celsius.ino.bin",
           "offset": 0
         }
       ]
