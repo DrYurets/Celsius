@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.9",
-  "releaseDate": "2026-07-14",
-  "whatsNew": "Общий интервал NTP+погоды в часах (админка). Пиктограмма домика у внутренней температуры. Документация AGENTS актуализирована.",
-  "notes": "A1.4.9: единый сетевой цикл по weatherUpdateHours; иконка дома на главном экране.",
+  "version": "A1.4.10",
+  "releaseDate": "2026-07-21",
+  "whatsNew": "Ветка 128x128: SH1107 + Adafruit_SH110X и кириллица (U8g2_for_Adafruit_GFX). Новый главный экран: indoor сверху, время+иконка погоды, 3-часовой прогноз с иконками WMO.",
+  "notes": "A1.4.10: главный экран с hourly+1..+3 и Meteocons; RTC-кеш weatherHourly* до 24 ч.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",

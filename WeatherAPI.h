@@ -54,6 +54,88 @@ RTC_DATA_ATTR float weatherDailyWindDayMs[4] = { NAN, NAN, NAN, NAN };
 RTC_DATA_ATTR float weatherDailyPrecipDayPct[4] = { NAN, NAN, NAN, NAN };
 RTC_DATA_ATTR float weatherNearestNightMinC = NAN;
 RTC_DATA_ATTR int32_t weatherNearestNightWmoCode = -1;
+/** Кеш hourly для главного экрана: от текущего часа API ≥24 слотов; на экране — 3 часа после часа на часах. */
+constexpr int kWeatherHourlyAheadCount = 3;
+constexpr int kWeatherHourlyCacheCount = 24;
+RTC_DATA_ATTR int8_t weatherHourlyHour[kWeatherHourlyCacheCount];
+RTC_DATA_ATTR float weatherHourlyTempC[kWeatherHourlyCacheCount];
+RTC_DATA_ATTR float weatherHourlyPrecipPct[kWeatherHourlyCacheCount];
+RTC_DATA_ATTR int32_t weatherHourlyWmoCode[kWeatherHourlyCacheCount];
+RTC_DATA_ATTR uint8_t weatherHourlyValidCount = 0;
+
+static inline void clearWeatherHourlyCache() {
+  weatherHourlyValidCount = 0;
+  for (int k = 0; k < kWeatherHourlyCacheCount; ++k) {
+    weatherHourlyHour[k] = -1;
+    weatherHourlyTempC[k] = NAN;
+    weatherHourlyPrecipPct[k] = NAN;
+    weatherHourlyWmoCode[k] = -1;
+  }
+}
+
+static inline int weatherHourFromIso(const String &iso) {
+  // YYYY-MM-DDTHH:MM...
+  if (iso.length() < 13) {
+    return -1;
+  }
+  int hour = iso.substring(11, 13).toInt();
+  if (hour < 0 || hour > 23) {
+    return -1;
+  }
+  return hour;
+}
+
+/** Три колонки: clockHour+1, +2, +3 из кеша (сдвигается при смене часа на часах). */
+static inline void weatherHourlyAheadForClock(int clockHour,
+                                             int8_t outHour[kWeatherHourlyAheadCount],
+                                             float outTemp[kWeatherHourlyAheadCount],
+                                             float outPop[kWeatherHourlyAheadCount],
+                                             int32_t outWmo[kWeatherHourlyAheadCount]) {
+  for (int k = 0; k < kWeatherHourlyAheadCount; ++k) {
+    outHour[k] = -1;
+    outTemp[k] = NAN;
+    outPop[k] = NAN;
+    outWmo[k] = -1;
+  }
+  if (weatherHourlyValidCount == 0 || clockHour < 0 || clockHour > 23) {
+    return;
+  }
+
+  int base = -1;
+  for (uint8_t i = 0; i < weatherHourlyValidCount; ++i) {
+    if (weatherHourlyHour[i] == (int8_t)clockHour) {
+      base = (int)i;
+      break;
+    }
+  }
+
+  int startIdx = -1;
+  if (base >= 0) {
+    startIdx = base + 1;
+  } else {
+    const int8_t want = (int8_t)((clockHour + 1) % 24);
+    for (uint8_t i = 0; i < weatherHourlyValidCount; ++i) {
+      if (weatherHourlyHour[i] == want) {
+        startIdx = (int)i;
+        break;
+      }
+    }
+  }
+  if (startIdx < 0) {
+    return;
+  }
+
+  for (int k = 0; k < kWeatherHourlyAheadCount; ++k) {
+    const int idx = startIdx + k;
+    if (idx >= (int)weatherHourlyValidCount) {
+      break;
+    }
+    outHour[k] = weatherHourlyHour[idx];
+    outTemp[k] = weatherHourlyTempC[idx];
+    outPop[k] = weatherHourlyPrecipPct[idx];
+    outWmo[k] = weatherHourlyWmoCode[idx];
+  }
+}
 
 static inline bool isLeapYear(int y) {
   return ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
@@ -254,6 +336,7 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
     weatherWindDirectionDeg = weatherJsonFloatOrNan(cur, "wind_direction_10m");
     weatherWmoCode = weatherJsonIntOrNeg1(cur, "weather_code");
     weatherPrecipProbabilityPct = NAN;
+    clearWeatherHourlyCache();
 
     weatherNearestNightMinC = NAN;
     weatherNearestNightWmoCode = -1;
@@ -261,6 +344,7 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
     if (doc.containsKey("hourly") && doc["hourly"].is<JsonObject>() &&
         cur.containsKey("time") && !cur["time"].isNull()) {
       JsonObject hourly = doc["hourly"].as<JsonObject>();
+      size_t currentHourIdx = (size_t)-1;
       if (hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
           hourly.containsKey("precipitation_probability") && hourly["precipitation_probability"].is<JsonArray>()) {
         JsonArray times = hourly["time"].as<JsonArray>();
@@ -282,11 +366,50 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
             if (!exactMatch && !sameHourMatch) {
               continue;
             }
+            currentHourIdx = i;
             if (!probs[i].isNull()) {
               weatherPrecipProbabilityPct = probs[i].as<float>();
             }
             break;
           }
+        }
+      }
+
+      // Кеш ~24 часов от текущего часа API (включая текущий) — сдвиг колонок по часу на часах.
+      if (currentHourIdx != (size_t)-1 &&
+          hourly.containsKey("time") && hourly["time"].is<JsonArray>() &&
+          hourly.containsKey("temperature_2m") && hourly["temperature_2m"].is<JsonArray>()) {
+        JsonArray hTime = hourly["time"].as<JsonArray>();
+        JsonArray hTemp = hourly["temperature_2m"].as<JsonArray>();
+        JsonArray hPop;
+        JsonArray hCode;
+        bool hasPop = hourly.containsKey("precipitation_probability") &&
+                      hourly["precipitation_probability"].is<JsonArray>();
+        bool hasCode = hourly.containsKey("weather_code") && hourly["weather_code"].is<JsonArray>();
+        if (hasPop) {
+          hPop = hourly["precipitation_probability"].as<JsonArray>();
+        }
+        if (hasCode) {
+          hCode = hourly["weather_code"].as<JsonArray>();
+        }
+        size_t n = hTime.size();
+        if (hTemp.size() < n) n = hTemp.size();
+        if (hasPop && hPop.size() < n) n = hPop.size();
+        if (hasCode && hCode.size() < n) n = hCode.size();
+        weatherHourlyValidCount = 0;
+        for (int k = 0; k < kWeatherHourlyCacheCount; ++k) {
+          size_t idx = currentHourIdx + (size_t)k;
+          if (idx >= n) {
+            break;
+          }
+          String iso = hTime[idx].as<String>();
+          weatherHourlyHour[k] = (int8_t)weatherHourFromIso(iso);
+          weatherHourlyTempC[k] = hTemp[idx].isNull() ? NAN : hTemp[idx].as<float>();
+          weatherHourlyPrecipPct[k] =
+              (hasPop && !hPop[idx].isNull()) ? hPop[idx].as<float>() : NAN;
+          weatherHourlyWmoCode[k] =
+              (hasCode && !hCode[idx].isNull()) ? hCode[idx].as<int32_t>() : -1;
+          weatherHourlyValidCount = (uint8_t)(k + 1);
         }
       }
 

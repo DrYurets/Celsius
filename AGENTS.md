@@ -23,21 +23,23 @@
 5. **Debug codes**: функции логирования на OLED (`logToDisplay`) завязаны на флаги показа дебага. Не нужно безусловно “засорять” OLED — используйте `settings.showDebugCodes` и существующие коды.
 
 ## Версия прошивки (`ROM_VERSION`)
-- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.9`).
+- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.10`).
 - Значение выводится на OLED в **режиме настройки** (SoftAP): строка вида `v: <ROM_VERSION>` в `updateConfigModeDisplay()`.
 - Для AutoOTA версия также задаётся в `project.json` (`version`); после OTA/сборки бинарник обычно лежит в `build/esp32.esp32.esp32c3/Celsius.ino.bin`.
 - Агент **не меняет** `ROM_VERSION` про себя; см. пункт 3 в блоке **IMPORTANT** выше.
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO2); `ROM_VERSION`.
+   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO2); `ROM_VERSION`; `OledDisplayCompat` / `drawClock`.
 2. `WeatherAPI.h`
-   - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`.
+   - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`; кеш `weatherHourly*` для главного экрана.
 3. `WeatherDetailScreens.h`
-   - отрисовка **7** экранов подробной погоды (GPIO4); данные только из RTC.
-4. `WebConfigServer.h`
+   - отрисовка **7** экранов подробной погоды (GPIO4); данные только из RTC; `drawWeatherIcon`.
+4. `Meteocons.h`
+   - глифы погоды по WMO `weather_code` (`meteoconByWmo` / `meteoconByWmoAndWind`).
+5. `WebConfigServer.h`
    - web-админка, сохранение настроек, OTA upload, экспорт/импорт JSON.
-5. `project.json`
+6. `project.json`
    - манифест AutoOTA (`version`, `whatsNew`/`notes`, URL к `.bin`).
 
 ## Поддерживаемые варианты экрана (ветки)
@@ -103,10 +105,15 @@
 
 ## Погодный модуль (WeatherAPI.h)
 ### Ожидаемый формат JSON
-- Источник: **Open-Meteo** Forecast API:
-  - `current.temperature_2m` (для главного экрана — целое °C),
-  - `hourly` / `daily` для детальных экранов,
-  - URL до 767 символов (`weatherApiUrl[768]`).
+- Источник: **Open-Meteo** Forecast API (единственный; `weatherSource` — legacy):
+  - `current.temperature_2m`, `current.weather_code`, PoP из matching `hourly` часа;
+  - `hourly` / `daily` для детальных экранов и главного экрана;
+  - URL до 767 символов (`weatherApiUrl[768]`), дефолт `latitude=53.92&longitude=30.35`.
+
+### RTC-кеш hourly для главного экрана
+- При успешном fetch: до **24** слотов от текущего часа API (`weatherHourlyHour/TempC/PrecipPct/WmoCode`, `weatherHourlyValidCount`).
+- На экране через `weatherHourlyAheadForClock(clockHour, …)` всегда колонки **`clockHour+1..+3`** (сдвигаются при смене часа на часах без нового HTTP).
+- Иконки: WMO `weather_code` → `Meteocons.h` / `drawWeatherIcon` (день/ночь по часу колонки / текущему часу).
 
 ### Интервалы обновления
 - `lastNetworkUpdate` / `lastNetworkNtpOk` в RTC (та же шкала `local` / `storedEpoch`, не `time(nullptr)`).
@@ -143,9 +150,10 @@
 
 ## Отображение на OLED (`128x128` / SH1107)
 ### Рисование (`drawClock`)
-- Adafruit_SH1107 + `U8g2_for_Adafruit_GFX` через `OledDisplayCompat` (UTF-8/кириллица).
-- Верх: weekday / дата / иконка OTA / батарея.
-- Крупное время около `y≈44`, низ (`y≈112`): outdoor | домик + indoor | влажность.
+- Adafruit_SH1107 + `U8g2_for_Adafruit_GFX` через `OledDisplayCompat` (UTF-8/кириллица; курсор снаружи — top-left).
+- Верхняя строка: weekday → дата → indoor T/RH → иконка OTA → батарея (без иконки домика).
+- Строка времени (`y≈16`): крупное HH:MM в левой зоне + иконка текущей погоды справа; под иконкой outdoor T и PoP.
+- Ниже: 3 колонки hourly (`час+1..+3`): **час → иконка → T → PoP**.
 - Ориентация BMI160 — `setRotation(0/2)`.
 - Детальная погода — кадры под 128×128 (`WeatherDetailScreens.h`).
 
