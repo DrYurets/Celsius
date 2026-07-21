@@ -1562,7 +1562,8 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   }
 
   const bool showWeather = settings.weatherEnabled && !isnan(outdoorTemperature);
-  const int16_t timeY = 16;
+  const int16_t timeY = 22;   // только HH:MM
+  const int16_t iconY = 16;   // иконка текущей погоды (без сдвига времени)
   const int16_t iconSize = 21;  // meteocon scale 1
   const int16_t iconGap = 3;
   const int16_t iconX = showWeather ? (int16_t)(screenW - iconSize - 2) : screenW;
@@ -1595,14 +1596,14 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
   if (showWeather) {
     const bool nightIcon = (h < NIGHT_END_H || h >= NIGHT_START_H);
-    drawWeatherIcon(display, iconX, timeY, 1, weatherWmoCode, weatherWindSpeedMs, nightIcon);
+    drawWeatherIcon(display, iconX, iconY, 1, weatherWmoCode, weatherWindSpeedMs, nightIcon);
 
     // Под иконкой: температура, затем вероятность осадков
     display.setTextSize(1);
     char outBuf[8];
     formatSignedIntCompact(outBuf, sizeof(outBuf), outdoorTemperature);
     int16_t tw = display.getTextWidth(outBuf);
-    const int16_t underIconY = (int16_t)(timeY + iconSize + 1);
+    const int16_t underIconY = (int16_t)(iconY + iconSize + 1);
     int16_t tX = (int16_t)(iconX + (iconSize - tw - 4) / 2);
     if (tX < 0) {
       tX = iconX;
