@@ -133,6 +133,7 @@
 ### OTA (web + AutoOTA)
 - Web OTA: `/ota` в setup mode; проверки OTA-partition, батареи, пароля AP; заливается application `.bin`.
 - AutoOTA: манифест `project.json`; индикатор на главном экране; ручное подтверждение через GPIO2.
+- Важно: библиотека AutoOTA считает update любую `version !=` текущей. В прошивке принимаем только **числово более новую** (`isRemoteFirmwareNewer`, напр. A1.4.10 > A1.4.9); иначе иконка/установка сбрасываются.
 
 ### Ограничение сетевого цикла
 В `runCycle()` WiFi для NTP/погоды/AutoOTA только если:

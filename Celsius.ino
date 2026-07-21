@@ -2,7 +2,7 @@
 * Celsius Clock (ESP32-C3)
 * https://github.com/DrYurets/Celsius/tree/aht20bmp280
 * 
-* Date: 20.07.2026
+* Date: 21.07.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -770,15 +770,12 @@ static bool runManualOtaInstall() {
   String notes;
   String binPath;
   bool hasInfo = autoOta.checkUpdate(&newVersion, &notes, &binPath);
-  if (!hasInfo || !autoOta.hasUpdate()) {
+  if (!hasInfo || !autoOta.hasUpdate() || !isRemoteFirmwareNewer(newVersion.c_str())) {
     display.clearDisplay();
     display.setCursor(0, 0);
     display.println("No update");
     display.display();
-    otaUpdateAvailable = false;
-    otaAvailableVersion[0] = '\0';
-    otaAvailableDate[0] = '\0';
-    otaAvailableMessage[0] = '\0';
+    clearOtaUpdateAvailable();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     setCpuLowPower();
@@ -1388,6 +1385,76 @@ static bool shouldCheckAutoOta(time_t local, bool timeValid, bool night, bool wo
 #endif
 }
 
+static void clearOtaUpdateAvailable() {
+  otaUpdateAvailable = false;
+  otaAvailableVersion[0] = '\0';
+  otaAvailableDate[0] = '\0';
+  otaAvailableMessage[0] = '\0';
+}
+
+/** Разбор A1.4.10 / 1.4.9 → major.minor.patch (префикс-буквы пропускаются). */
+static bool parseFirmwareVersionTriplet(const char *s, int &maj, int &minv, int &pat) {
+  maj = minv = pat = 0;
+  if (!s || !*s) {
+    return false;
+  }
+  while (*s && (*s < '0' || *s > '9')) {
+    ++s;
+  }
+  if (!*s) {
+    return false;
+  }
+  maj = atoi(s);
+  const char *dot1 = strchr(s, '.');
+  if (!dot1) {
+    return true;
+  }
+  minv = atoi(dot1 + 1);
+  const char *dot2 = strchr(dot1 + 1, '.');
+  if (!dot2) {
+    return true;
+  }
+  pat = atoi(dot2 + 1);
+  return true;
+}
+
+/** >0 remote новее, 0 равно, <0 remote старше. Числовое сравнение, не strcmp. */
+static int compareFirmwareVersions(const char *remote, const char *local) {
+  int rMaj = 0, rMin = 0, rPat = 0, lMaj = 0, lMin = 0, lPat = 0;
+  const bool rOk = parseFirmwareVersionTriplet(remote, rMaj, rMin, rPat);
+  const bool lOk = parseFirmwareVersionTriplet(local, lMaj, lMin, lPat);
+  if (rOk && lOk) {
+    if (rMaj != lMaj) {
+      return rMaj - lMaj;
+    }
+    if (rMin != lMin) {
+      return rMin - lMin;
+    }
+    return rPat - lPat;
+  }
+  if (!remote) {
+    remote = "";
+  }
+  if (!local) {
+    local = "";
+  }
+  return strcmp(remote, local);
+}
+
+static bool isRemoteFirmwareNewer(const char *remote) {
+  return compareFirmwareVersions(remote, ROM_VERSION) > 0;
+}
+
+/** Сбросить RTC-флаг, если «доступная» версия не новее текущей (AutoOTA считает update любую ≠). */
+static void sanitizeOtaUpdateFlag() {
+  if (!otaUpdateAvailable) {
+    return;
+  }
+  if (!otaAvailableVersion[0] || !isRemoteFirmwareNewer(otaAvailableVersion)) {
+    clearOtaUpdateAvailable();
+  }
+}
+
 static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled) {
 #if AUTOOTA_ENABLED
   if (!shouldCheckAutoOta(local, timeValid, night, workdayEnabled)) {
@@ -1415,10 +1482,15 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
   }
   if (!autoOta.hasUpdate()) {
     Serial.println("[AutoOTA] No update");
-    otaUpdateAvailable = false;
-    otaAvailableVersion[0] = '\0';
-    otaAvailableDate[0] = '\0';
-    otaAvailableMessage[0] = '\0';
+    clearOtaUpdateAvailable();
+    return;
+  }
+
+  // Библиотека AutoOTA: любая version != текущей → update (в т.ч. откат A1.4.9 при локальной A1.4.10).
+  if (!isRemoteFirmwareNewer(newVersion.c_str())) {
+    Serial.printf("[AutoOTA] Ignore non-newer remote %s (current %s)\n",
+                  newVersion.c_str(), ROM_VERSION);
+    clearOtaUpdateAvailable();
     return;
   }
 
@@ -1495,6 +1567,7 @@ static void formatSignedIntCompact(char *out, size_t outSize, float t) {
 }
 
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
+  sanitizeOtaUpdateFlag();
   updateDisplayOrientationFromBmi160();
   applyDisplayOrientation();
   display.clearDisplay();
