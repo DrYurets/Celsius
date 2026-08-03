@@ -11,7 +11,8 @@
     "timeFormat24h": true,
     "hourlyBlink": true,
     "weekdayLanguageRu": true,
-    "uiLanguage": "ru"
+    "uiLanguage": "ru",
+    "showSyncProgress": false
   },
   "nightMode": {
     "startH": 23,

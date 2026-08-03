@@ -3,10 +3,13 @@
 
 #include <cmath>
 #include <cstdio>
+#include <time.h>
 #include "Meteocons.h"
 
 /** Количество страниц подробной погоды (GPIO4). */
 constexpr uint8_t kWeatherDetailScreenCount = 7;
+/** Погода + экран статуса (версия / NTP / погода). */
+constexpr uint8_t kDetailScreenCount = kWeatherDetailScreenCount + 1;
 
 /** 16-румбовая роза; deg — метеорологические градусы (0 = север, по часовой). */
 inline const char *windDirectionLabel16Ru(float deg) {
@@ -370,6 +373,62 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       break;
     }
   }
+
+  display.display();
+}
+
+/** Экран статуса после страниц погоды: версия прошивки, последняя успешная синхронизация NTP и погоды. */
+template <typename DisplayT>
+inline void drawSyncStatusScreen(DisplayT &display,
+                                 const char *romVersion,
+                                 time_t lastNtpLocalEpoch,
+                                 time_t lastWeatherLocalEpoch,
+                                 uint8_t screenNumber) {
+  display.clearDisplay();
+  display.setTextColor(1);
+  display.setTextSize(1);
+
+  display.setCursor(116, 116);
+  display.print((int)screenNumber);
+
+  display.setCursor(0, 4);
+  display.print("Статус");
+
+  display.setCursor(0, 24);
+  display.print("Версия:");
+  display.setCursor(0, 40);
+  display.print(romVersion ? romVersion : "--");
+
+  auto formatLocalStamp = [](time_t epoch, char *dateBuf, size_t dateSize, char *timeBuf, size_t timeSize) {
+    if (epoch <= 0) {
+      snprintf(dateBuf, dateSize, "--.--.----");
+      snprintf(timeBuf, timeSize, "--:--");
+      return;
+    }
+    struct tm ti = {};
+    localtime_r(&epoch, &ti);
+    snprintf(dateBuf, dateSize, "%02d.%02d.%04d", ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900);
+    snprintf(timeBuf, timeSize, "%02d:%02d", ti.tm_hour, ti.tm_min);
+  };
+
+  char dateBuf[12];
+  char timeBuf[8];
+
+  display.setCursor(0, 60);
+  display.print("NTP:");
+  formatLocalStamp(lastNtpLocalEpoch, dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
+  display.setCursor(0, 74);
+  display.print(dateBuf);
+  display.print(" ");
+  display.print(timeBuf);
+
+  display.setCursor(0, 94);
+  display.print("Погода:");
+  formatLocalStamp(lastWeatherLocalEpoch, dateBuf, sizeof(dateBuf), timeBuf, sizeof(timeBuf));
+  display.setCursor(0, 108);
+  display.print(dateBuf);
+  display.print(" ");
+  display.print(timeBuf);
 
   display.display();
 }

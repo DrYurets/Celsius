@@ -13,7 +13,7 @@
 - обновляет экран и затем уходит в deep sleep до следующего нужного момента;
 - может (опционально) запрашивать уличную температуру с погодного API по HTTP (включая подробный debug в Serial и на экране);
 - поддерживает ручной/веб OTA и проверку обновлений AutoOTA;
-- (ветки `128x64` / `128x128`) может переворачивать экран по BMI160 и показывать 7 экранов детальной погоды.
+- (ветки `128x64` / `128x128`) может переворачивать экран по BMI160 и показывать 7 экранов детальной погоды (+ экран статуса на `128x128`).
 
 ## Не ломать инварианты (самое важное)
 1. **Deep sleep и расписание пробуждения**: логика `runCycle()` возвращает число секунд до следующего пробуждения, затем вызывается `esp_deep_sleep_start()`. Любые новые сетевые/тяжёлые действия должны быть встроены так, чтобы не ломать сон и не увеличивать время активной фазы без необходимости.
@@ -34,7 +34,7 @@
 2. `WeatherAPI.h`
    - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`; кеш `weatherHourly*` для главного экрана.
 3. `WeatherDetailScreens.h`
-   - отрисовка **7** экранов подробной погоды (GPIO4); данные только из RTC; `drawWeatherIcon`.
+   - отрисовка **7** экранов подробной погоды (GPIO4) + экран статуса; данные только из RTC; `drawWeatherIcon`.
 4. `Meteocons.h`
    - глифы погоды по WMO `weather_code` (`meteoconByWmo` / `meteoconByWmoAndWind`).
 5. `WebConfigServer.h`
@@ -73,7 +73,7 @@
 - Интервал задаётся **`settings.weatherUpdateHours`** (1..24, по умолчанию 1) — одно поле админки **Time and Network Sync → Update interval (hours)**.
 - Проверка: `shouldUpdateNetwork(local, weatherUpdateHours, weatherEnabled)` в `WeatherAPI.h`.
 - Условия запуска в `runCycle()`: `timeValid && workdayEnabled && !night && shouldUpdateNetwork(...)`.
-- При успехе/попытке пишется `lastNetworkUpdate = local`; при ошибке NTP — `lastNetworkNtpOk = false` (повтор через ~5 мин).
+- При успехе/попытке пишется `lastNetworkUpdate = local`; при ошибке WiFi/NTP/погоды — `lastNetworkNtpOk = false` (повтор через ~5 мин).
 - Поле `syncDays` в `DeviceSettings` остаётся в EEPROM (совместимость layout), но **не задаёт** расписание NTP.
 
 ### RTC drift compensation
@@ -93,7 +93,7 @@
 
 ### EEPROM и сохранение настроек
 - Структура `DeviceSettings` (фрагмент актуальных полей):
-  - флаги отображения (debug, date, weekday, 12/24, hourly blink),
+  - флаги отображения (debug, date, weekday, 12/24, hourly blink, **`showSyncProgress`**),
   - night mode, timezone, timeCorrectionPerDay,
   - `syncDays` (legacy layout),
   - погода: `weatherEnabled`, координаты, `weatherApiUrl[768]`, **`weatherUpdateHours`** (NTP+погода), `weatherScreenSeconds`,
@@ -101,7 +101,13 @@
   - AutoOTA: `autoOtaEnabled`, `autoOtaCheckHours`,
   - `activeWeekdaysMask`.
 - Адреса: SSID `0`, PASS `64`, Settings `128`; `EEPROM_SIZE` 2048 + `static_assert`.
-- Дефолты: Open-Meteo, `weatherUpdateHours = 1`, `activeWeekdaysMask = WEEKDAY_MASK_ALL`, `forecast_days=4` в URL.
+- Дефолты: Open-Meteo, `weatherUpdateHours = 1`, `activeWeekdaysMask = WEEKDAY_MASK_ALL`, `forecast_days=4` в URL, **`showSyncProgress = false`**.
+
+### Экран прогресса синхронизации (`showSyncProgress`)
+- Опция в админке **Display Settings → Show sync progress on OLED** (по умолчанию выкл.).
+- Если включено: на время сетевого цикла главный экран заменяется на шаги WiFi → NTP → OTA → Погода (`...` / `OK` / `ERR` / `-`).
+- После завершения — краткий итог «Готово»/«Ошибка», затем обычный `drawClock` (и при необходимости экраны по кнопке).
+- Удлиняет активную фазу только на время сетевого цикла, когда опция включена.
 
 ## Погодный модуль (WeatherAPI.h)
 ### Ожидаемый формат JSON
@@ -120,14 +126,16 @@
 - `shouldUpdateNetwork(currentTime, updateHours, weatherEnabled)`:
   - `lastNetworkUpdate == 0` → сразу;
   - `updateHours` вне 1..24 → принудительно 1;
-  - ошибка NTP или (weatherEnabled и outdoor NaN) → период 5 минут;
+  - ошибка прошлого сеанса (`!lastNetworkNtpOk`) или (weatherEnabled и нет успешной погоды / outdoor NaN) → период 5 минут;
   - иначе `updateHours * 3600`;
   - откат времени (`delta < 0`) → `true`.
 
 ### Экран подробной погоды (кнопка)
 - **`WEATHER_BUTTON_PIN` (GPIO4)** → GND: wakeup / показ деталей.
 - **`OTA_BUTTON_PIN` (GPIO2)** → просмотр OTA changelog / длинное удержание — установка.
-- `kWeatherDetailScreenCount = 7`; повторного HTTP нет — только RTC-кеш.
+- `kWeatherDetailScreenCount = 7`, всего страниц `kDetailScreenCount = 8` (после погоды — статус).
+- Экран статуса: `ROM_VERSION`, дата/время последней успешной NTP (`lastSyncLocalEpoch`) и погоды (`lastSuccessfulWeatherLocalEpoch`).
+- Повторного HTTP нет — только RTC-кеш.
 - Для прогноза на 3 дня вперёд API с `forecast_days=4`; ночной минимум — hourly `21:00..08:59`.
 
 ### OTA (web + AutoOTA)
@@ -143,7 +151,9 @@
 Погода внутри сеанса — дополнительно при `settings.weatherEnabled`.
 
 ### WiFi в сетевом цикле
+- Общий хелпер `connectWifiSta()`: `WIFI_OFF` → STA, `WIFI_POWER_15dBm`, `WiFi.begin(ssid, pass)` **без** фиксации канала (канал `15` в API — не мощность), таймаут **30 с**.
 - Подключение STA → NTP → AutoOTA → погода (опционально) → `WiFi.disconnect(true)` + `WIFI_OFF` + low CPU.
+- Экран «Статус»: NTP/погода обновляются **только при успехе**. Часы при этом идут от RTC — отсутствие сети на главном экране неочевидно. При фейле WiFi/NTP/погоды — `lastNetworkNtpOk=false`, повтор ~5 мин.
 
 ### Debug
 - Serial в `WeatherAPI.h` (URL, HTTP, JSON).

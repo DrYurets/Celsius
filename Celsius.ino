@@ -1,8 +1,8 @@
 /*
-* Celsius Clock (ESP32-C3)
-* https://github.com/DrYurets/Celsius/tree/aht20bmp280
-* 
-* Date: 21.07.2026
+* Celsius Clock
+* ROM version: A1.4.11
+* https://github.com/DrYurets/Celsius/tree/128x128
+* Date: 03.08.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -36,10 +36,11 @@
 #include "sensors/SensorManager.h"
 #include "WeatherAPI.h"
 #include "WeatherDetailScreens.h"
+#include "SyncProgress.h"
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.10"
+#define ROM_VERSION "A1.4.11"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -423,6 +424,7 @@ struct DeviceSettings {
   bool autoOtaEnabled;           // автоматическая проверка и установка OTA
   uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
+  bool showSyncProgress;         // OLED: экран шагов NTP/погоды вместо главных часов (по умолч. выкл.)
 };
 
 static_assert(EEPROM_SIZE >= (EEPROM_SETTINGS_ADDR + sizeof(DeviceSettings)),
@@ -454,7 +456,8 @@ static DeviceSettings settings = {
   .bmi160Enabled = true,
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
-  .activeWeekdaysMask = WEEKDAY_MASK_ALL
+  .activeWeekdaysMask = WEEKDAY_MASK_ALL,
+  .showSyncProgress = false
 };
 
 static bool parseFloatQueryParam(const char *url, const char *key, float &outValue) {
@@ -504,6 +507,8 @@ static bool wokeByWeatherButton = false;
 static bool bmi160Ready = false;
 static bool runManualOtaInstall();
 static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs);
+/** -1 = пропуск, 0 = ошибка проверки, 1 = проверка ок (с update или без). */
+static int tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled);
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -710,11 +715,11 @@ static void showOtaUpdateInfoScreen() {
   }
 }
 
-static bool ensureWiFiConnectedForOta() {
+/** STA connect: channel 0 = любой (не фиксировать 15 — это не TX power). */
+static bool connectWifiSta(uint32_t timeoutMs = 30000UL) {
   if (WiFi.status() == WL_CONNECTED) {
     return true;
   }
-  // Повторяем схему подключения как в ntpSync(), она на устройстве уже проверена.
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(80);
@@ -722,12 +727,16 @@ static bool ensureWiFiConnectedForOta() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_15dBm);
-  WiFi.begin(wifiSSID, wifiPassword, 15);
+  WiFi.begin(wifiSSID, wifiPassword);  // channel 0: сканировать все каналы
   uint32_t startMs = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 30000UL) {
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < timeoutMs) {
     delay(250);
   }
   return WiFi.status() == WL_CONNECTED;
+}
+
+static bool ensureWiFiConnectedForOta() {
+  return connectWifiSta(30000UL);
 }
 
 static bool runManualOtaInstall() {
@@ -1077,6 +1086,7 @@ void loadSettings() {
     settings.autoOtaEnabled = true;
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
+    settings.showSyncProgress = false;
   }
 
   // Если координаты в EEPROM невалидны (старая версия), пробуем извлечь их из сохраненного URL.
@@ -1123,6 +1133,8 @@ void loadSettings() {
   }
   settings.autoOtaEnabled = settings.autoOtaEnabled ? true : false;
   settings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
+  // Новый bool в конце struct: старый EEPROM даёт 0xFF → не считать включённым.
+  settings.showSyncProgress = (*(const uint8_t *)&settings.showSyncProgress == 1);
 
   displayUpsideDown = !!displayUpsideDown;
 }
@@ -1153,6 +1165,7 @@ bool exportSettingsToJson(String &outJson) {
   displayCfg["hourlyBlink"] = settings.hourlyBlink;
   displayCfg["weekdayLanguageRu"] = settings.weekdayLanguageRu;
   displayCfg["uiLanguage"] = (settings.uiLanguage == UI_LANG_EN) ? "en" : "ru";
+  displayCfg["showSyncProgress"] = settings.showSyncProgress;
 
   JsonObject night = doc.createNestedObject("nightMode");
   night["startH"] = settings.nightStartH;
@@ -1208,6 +1221,7 @@ bool importSettingsFromJson(const String &json, String &error) {
     if (lang) {
       newSettings.uiLanguage = (strcmp(lang, "en") == 0) ? UI_LANG_EN : UI_LANG_RU;
     }
+    if (displayCfg.containsKey("showSyncProgress")) newSettings.showSyncProgress = displayCfg["showSyncProgress"];
   }
 
   JsonObject night = doc["nightMode"];
@@ -1455,17 +1469,18 @@ static void sanitizeOtaUpdateFlag() {
   }
 }
 
-static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled) {
+/** -1 = пропуск, 0 = ошибка проверки, 1 = проверка ок (с update или без). */
+static int tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled) {
 #if AUTOOTA_ENABLED
   if (!shouldCheckAutoOta(local, timeValid, night, workdayEnabled)) {
-    return;
+    return -1;
   }
   lastAutoOtaCheckEpoch = local;
 
   float vBat = readBattery();
   if (vBat < AUTOOTA_MIN_BATTERY_V) {
     Serial.printf("[AutoOTA] Skipped: battery %.2fV < %.2fV\n", vBat, AUTOOTA_MIN_BATTERY_V);
-    return;
+    return -1;
   }
 
   String newVersion;
@@ -1475,15 +1490,15 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
   if (!hasInfo) {
     if (autoOta.hasError()) {
       Serial.printf("[AutoOTA] checkUpdate error: %d\n", (int)autoOta.getError());
-    } else {
-      Serial.println("[AutoOTA] checkUpdate: no update info");
+      return 0;
     }
-    return;
+    Serial.println("[AutoOTA] checkUpdate: no update info");
+    return 1;
   }
   if (!autoOta.hasUpdate()) {
     Serial.println("[AutoOTA] No update");
     clearOtaUpdateAvailable();
-    return;
+    return 1;
   }
 
   // Библиотека AutoOTA: любая version != текущей → update (в т.ч. откат A1.4.9 при локальной A1.4.10).
@@ -1491,7 +1506,7 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
     Serial.printf("[AutoOTA] Ignore non-newer remote %s (current %s)\n",
                   newVersion.c_str(), ROM_VERSION);
     clearOtaUpdateAvailable();
-    return;
+    return 1;
   }
 
   Serial.printf("[AutoOTA] Update found: %s -> %s\n", ROM_VERSION, newVersion.c_str());
@@ -1507,11 +1522,13 @@ static void tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool work
   strlcpy(otaAvailableDate, releaseDate.c_str(), sizeof(otaAvailableDate));
   strlcpy(otaAvailableMessage, whatsNew.c_str(), sizeof(otaAvailableMessage));
   Serial.println("[AutoOTA] Update is available (manual confirm pending)");
+  return 1;
 #else
   (void)local;
   (void)timeValid;
   (void)night;
   (void)workdayEnabled;
+  return -1;
 #endif
 }
 
@@ -1761,17 +1778,7 @@ bool ntpSync() {
   logToDisplay(CODE_WIFI_CONNECT, nullptr, 0);
   setCpuPerformance();
 
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_15dBm);
-  WiFi.begin(wifiSSID, wifiPassword, 15);
-
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 30000UL) {
-    delay(250);
-  }
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!connectWifiSta(30000UL)) {
     logToDisplay(CODE_WIFI_FAIL);
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -1808,6 +1815,91 @@ bool ntpSync() {
   WiFi.mode(WIFI_OFF);
   setCpuLowPower();
   return ok;
+}
+
+static SyncProgressState syncProgress = {};
+
+static const char *syncStepMark(SyncStepStatus st) {
+  switch (st) {
+    case SYNC_STEP_RUN: return "...";
+    case SYNC_STEP_OK: return "OK";
+    case SYNC_STEP_FAIL: return "ERR";
+    case SYNC_STEP_SKIP: return "-";
+    default: return " ";
+  }
+}
+
+static void drawSyncProgressScreen() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 2);
+  display.print("Синхронизация");
+
+  display.setCursor(0, 22);
+  display.print("WiFi");
+  display.setCursor(88, 22);
+  display.print(syncStepMark(syncProgress.wifi));
+
+  display.setCursor(0, 40);
+  display.print("NTP");
+  display.setCursor(88, 40);
+  display.print(syncStepMark(syncProgress.ntp));
+
+  display.setCursor(0, 58);
+  display.print("OTA");
+  display.setCursor(88, 58);
+  display.print(syncStepMark(syncProgress.ota));
+
+  display.setCursor(0, 76);
+  display.print("Погода");
+  display.setCursor(88, 76);
+  display.print(syncStepMark(syncProgress.weather));
+
+  if (syncProgress.finished) {
+    display.setCursor(0, 100);
+    display.print(syncProgress.overallOk ? "Готово" : "Ошибка");
+  }
+
+  display.display();
+}
+
+static bool syncProgressEnabled() {
+  return settings.showSyncProgress;
+}
+
+static void syncProgressBegin() {
+  if (!syncProgressEnabled()) {
+    return;
+  }
+  syncProgress = {};
+  syncProgress.wifi = SYNC_STEP_WAIT;
+  syncProgress.ntp = SYNC_STEP_WAIT;
+  syncProgress.ota = SYNC_STEP_WAIT;
+  syncProgress.weather = settings.weatherEnabled ? SYNC_STEP_WAIT : SYNC_STEP_SKIP;
+  setDisplayState(true);
+  setBrightness(0x01);
+  updateDisplayOrientationFromBmi160();
+  applyDisplayOrientation();
+  drawSyncProgressScreen();
+}
+
+static void syncProgressSet(SyncStepStatus *field, SyncStepStatus st) {
+  if (!syncProgressEnabled() || !field) {
+    return;
+  }
+  *field = st;
+  drawSyncProgressScreen();
+}
+
+static void syncProgressFinish(bool overallOk) {
+  if (!syncProgressEnabled()) {
+    return;
+  }
+  syncProgress.finished = true;
+  syncProgress.overallOk = overallOk;
+  drawSyncProgressScreen();
 }
 
 // NTP sync, когда WiFi уже подключен (используется в погодном цикле)
@@ -1922,65 +2014,72 @@ uint32_t runCycle() {
   if (timeValid && workdayEnabled && !night && shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled)) {
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
+    syncProgressBegin();
 
-    // Проверяем текущий статус WiFi
-    wl_status_t wifiStatus = WiFi.status();
     char detail[32];
-    snprintf(detail, sizeof(detail), "WiFi st=%d", wifiStatus);
+    syncProgressSet(&syncProgress.wifi, SYNC_STEP_RUN);
+    const bool wifiOk = connectWifiSta(30000UL);
+    wl_status_t wifiStatus = WiFi.status();
+    syncProgressSet(&syncProgress.wifi, wifiOk ? SYNC_STEP_OK : SYNC_STEP_FAIL);
+    snprintf(detail, sizeof(detail), "Final st=%d", (int)wifiStatus);
     logToDisplay(CODE_WEATHER_FETCH, detail);
-
-    // Подключаемся к WiFi, если не подключены
-    if (wifiStatus != WL_CONNECTED) {
-      WiFi.persistent(false);
-      WiFi.mode(WIFI_STA);
-      WiFi.setSleep(false);
-      WiFi.begin(wifiSSID, wifiPassword, 15);
-
-      unsigned long startAttempt = millis();
-      while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt) < 15000UL) {
-        delay(200);
-        wifiStatus = WiFi.status();
-        if ((millis() - startAttempt) % 2000 < 200) {  // Показываем статус каждые 2 секунды
-          snprintf(detail, sizeof(detail), "Connecting %d", wifiStatus);
-          logToDisplay(CODE_WEATHER_FETCH, detail);
-        }
-      }
-    }
-
-    wifiStatus = WiFi.status();
-    snprintf(detail, sizeof(detail), "Final st=%d", wifiStatus);
-    logToDisplay(CODE_WEATHER_FETCH, detail);
+    Serial.printf("[Net] STA connect %s (st=%d)\n", wifiOk ? "ok" : "fail", (int)wifiStatus);
 
     bool ntpOk = false;
-    if (wifiStatus == WL_CONNECTED) {
+    bool weatherOk = !settings.weatherEnabled;
+    int otaRc = -1;
+    if (wifiOk) {
+      syncProgressSet(&syncProgress.ntp, SYNC_STEP_RUN);
       ntpOk = ntpSyncOverConnectedWiFi();
+      syncProgressSet(&syncProgress.ntp, ntpOk ? SYNC_STEP_OK : SYNC_STEP_FAIL);
       local = applyDriftCorrection(storedEpoch, lastSyncLocalEpoch);
       local = applyTimeCorrection(local, lastSyncLocalEpoch);
       timeValid = hasValidTime(local);
       if (timeValid) {
         localtime_r(&local, &ti);
       }
-      tryAutoOtaUpdate(local, timeValid, night, workdayEnabled);
+
+      syncProgressSet(&syncProgress.ota, SYNC_STEP_RUN);
+      otaRc = tryAutoOtaUpdate(local, timeValid, night, workdayEnabled);
+      if (otaRc < 0) {
+        syncProgressSet(&syncProgress.ota, SYNC_STEP_SKIP);
+      } else {
+        syncProgressSet(&syncProgress.ota, (otaRc > 0) ? SYNC_STEP_OK : SYNC_STEP_FAIL);
+      }
+
       if (settings.weatherEnabled) {
-        bool success = fetchOutdoorTemperature(settings.weatherApiUrl, WEATHER_SOURCE_OPEN_METEO);
-        if (success) {
+        syncProgressSet(&syncProgress.weather, SYNC_STEP_RUN);
+        weatherOk = fetchOutdoorTemperature(settings.weatherApiUrl, WEATHER_SOURCE_OPEN_METEO);
+        syncProgressSet(&syncProgress.weather, weatherOk ? SYNC_STEP_OK : SYNC_STEP_FAIL);
+        if (weatherOk) {
+          lastSuccessfulWeatherLocalEpoch = local;
           snprintf(detail, sizeof(detail), "T=%d", (int)outdoorTemperature);
           logToDisplay(CODE_WEATHER_OK, detail);
         } else {
           logToDisplay(CODE_WEATHER_ERROR);
         }
       }
+      Serial.printf("[Net] NTP=%d weather=%d ota=%d\n", (int)ntpOk, (int)weatherOk, otaRc);
     } else {
-      snprintf(detail, sizeof(detail), "Status=%d", wifiStatus);
+      syncProgressSet(&syncProgress.ntp, SYNC_STEP_SKIP);
+      syncProgressSet(&syncProgress.ota, SYNC_STEP_SKIP);
+      if (settings.weatherEnabled) {
+        syncProgressSet(&syncProgress.weather, SYNC_STEP_SKIP);
+      }
+      snprintf(detail, sizeof(detail), "Status=%d", (int)wifiStatus);
       logToDisplay(CODE_WEATHER_WIFI_FAIL, detail);
     }
 
     lastNetworkUpdate = local;
-    lastNetworkNtpOk = ntpOk;
+    // Короткий retry, если NTP или погода не удались (кеш T на экране может оставаться валидным).
+    lastNetworkNtpOk = ntpOk && weatherOk;
 
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     setCpuLowPower();
+
+    const bool overallOk = wifiOk && ntpOk && weatherOk && (otaRc != 0);
+    syncProgressFinish(overallOk);
   }
 
   if (!timeValid) {
@@ -2001,36 +2100,14 @@ uint32_t runCycle() {
         delay(900);
       }
     } else if (wokeByWeatherButton || weatherButtonPressedNow) {
-      // Показываем детали погоды либо после wakeup по кнопке,
-      // либо если кнопку (GPIO4) держат замкнутой прямо сейчас.
+      // Страницы погоды (0..6) + статус (7): версия, последняя NTP/погода.
       uint32_t detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
       uint8_t detailPage = 0;
       bool prevBtnLow = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
-      drawWeatherDetailScreen(display,
-                              detailPage,
-                              outdoorTemperature,
-                              weatherFeelsLikeC,
-                              weatherPressureHpa,
-                              weatherHumidityPct,
-                              weatherWindSpeedMs,
-                              weatherWindDirectionDeg,
-                              weatherWmoCode,
-                              weatherPrecipProbabilityPct,
-                              weatherDailyWmoCode,
-                              weatherDailyTempMaxC,
-                              weatherDailyTempMinC,
-                              weatherDailyWindDayMs,
-                              weatherDailyPrecipDayPct,
-                              (uint8_t)ti.tm_wday,
-                              weatherNearestNightMinC,
-                              weatherNearestNightWmoCode);
-      while ((int32_t)(millis() - detailEndMs) < 0) {
-        bool low = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
-        if (low && !prevBtnLow) {
-          detailPage = (detailPage + 1) % kWeatherDetailScreenCount;
-          detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
+      auto redrawDetailPage = [&](uint8_t page) {
+        if (page < kWeatherDetailScreenCount) {
           drawWeatherDetailScreen(display,
-                                  detailPage,
+                                  page,
                                   outdoorTemperature,
                                   weatherFeelsLikeC,
                                   weatherPressureHpa,
@@ -2047,6 +2124,21 @@ uint32_t runCycle() {
                                   (uint8_t)ti.tm_wday,
                                   weatherNearestNightMinC,
                                   weatherNearestNightWmoCode);
+        } else {
+          drawSyncStatusScreen(display,
+                               ROM_VERSION,
+                               lastSyncLocalEpoch,
+                               lastSuccessfulWeatherLocalEpoch,
+                               (uint8_t)(page + 1));
+        }
+      };
+      redrawDetailPage(detailPage);
+      while ((int32_t)(millis() - detailEndMs) < 0) {
+        bool low = (digitalRead(WEATHER_BUTTON_PIN) == LOW);
+        if (low && !prevBtnLow) {
+          detailPage = (detailPage + 1) % kDetailScreenCount;
+          detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
+          redrawDetailPage(detailPage);
           delay(45);
         }
         prevBtnLow = low;

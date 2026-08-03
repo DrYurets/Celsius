@@ -39,6 +39,8 @@ RTC_DATA_ATTR float outdoorTemperature = NAN;
 RTC_DATA_ATTR float previousOutdoorTemperature = NAN;
 RTC_DATA_ATTR time_t lastNetworkUpdate = 0;   // последний WiFi-сеанс (NTP + опционально погода)
 RTC_DATA_ATTR bool lastNetworkNtpOk = true;   // короткий интервал повтора при ошибке NTP
+/** Локальный epoch последней успешной загрузки погоды (0 = ещё не было). */
+RTC_DATA_ATTR time_t lastSuccessfulWeatherLocalEpoch = 0;
 RTC_DATA_ATTR float weatherPressureHpa = NAN;
 RTC_DATA_ATTR float weatherHumidityPct = NAN;
 RTC_DATA_ATTR float weatherWindSpeedMs = NAN;
@@ -574,6 +576,7 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
 }
 
 // Интервал NTP + погоды в активном режиме, updateHours — из админки (1..24 ч).
+// lastNetworkNtpOk=false → повтор через ~5 мин (WiFi/NTP/погода не удались в прошлом сеансе).
 bool shouldUpdateNetwork(time_t currentTime, uint8_t updateHours, bool weatherEnabled) {
   if (lastNetworkUpdate == 0) {
     return true;
@@ -582,7 +585,8 @@ bool shouldUpdateNetwork(time_t currentTime, uint8_t updateHours, bool weatherEn
     updateHours = 1;
   }
   uint32_t updatePeriodSec = (uint32_t)updateHours * 3600UL;
-  bool needShortRetry = !lastNetworkNtpOk || (weatherEnabled && isnan(outdoorTemperature));
+  bool weatherNeverOk = weatherEnabled && (lastSuccessfulWeatherLocalEpoch == 0 || isnan(outdoorTemperature));
+  bool needShortRetry = !lastNetworkNtpOk || weatherNeverOk;
   uint32_t period = needShortRetry ? 300UL : updatePeriodSec;
   time_t delta = currentTime - lastNetworkUpdate;
   if (delta < 0) {

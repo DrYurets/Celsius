@@ -89,6 +89,8 @@ String getConfigPage() {
   html += "<div class='checkbox-label'><input type='checkbox' name='timeFormat24h' " + String(settings.timeFormat24h ? "checked" : "") + "><label>24-hour format</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBlink' " + String(settings.hourlyBlink ? "checked" : "") + "><label>Hourly LED blink</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='weekdayLanguageRu' " + String(settings.weekdayLanguageRu ? "checked" : "") + "><label>Weekday in Russian</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='showSyncProgress' " + String(settings.showSyncProgress ? "checked" : "") + "><label>Show sync progress on OLED</label></div>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>When enabled, network sync (WiFi/NTP/weather) replaces the clock screen and shows step results. Default: off.</p>";
   html += "<label>Language:</label>";
   html += "<select name='uiLanguage' style='width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #555; border-radius: 5px; background: #333; color: #fff; box-sizing: border-box;'>";
   html += "<option value='ru' " + String(settings.uiLanguage == UI_LANG_RU ? "selected" : "") + ">Russian</option>";
@@ -284,6 +286,7 @@ void handleSave() {
     settings.timeFormat24h = server.hasArg("timeFormat24h");
     settings.hourlyBlink = server.hasArg("hourlyBlink");
     settings.weekdayLanguageRu = server.hasArg("weekdayLanguageRu");
+    settings.showSyncProgress = server.hasArg("showSyncProgress");
     if (server.hasArg("uiLanguage")) {
       String lang = server.arg("uiLanguage");
       lang.trim();
@@ -495,6 +498,7 @@ void handleSettingsExport() {
     if (server.hasArg("timeFormat24h")) preview.timeFormat24h = true; else preview.timeFormat24h = false;
     if (server.hasArg("hourlyBlink")) preview.hourlyBlink = true; else preview.hourlyBlink = false;
     if (server.hasArg("weekdayLanguageRu")) preview.weekdayLanguageRu = true; else preview.weekdayLanguageRu = false;
+    preview.showSyncProgress = server.hasArg("showSyncProgress");
     if (server.hasArg("uiLanguage")) {
       String lang = server.arg("uiLanguage");
       lang.trim();
