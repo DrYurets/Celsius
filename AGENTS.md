@@ -30,7 +30,7 @@
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO2); `ROM_VERSION`; `OledDisplayCompat` / `drawClock`.
+   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO0 / LED); `ROM_VERSION`; `OledDisplayCompat` / `drawClock`.
 2. `WeatherAPI.h`
    - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`; кеш `weatherHourly*` для главного экрана.
 3. `WeatherDetailScreens.h`
@@ -132,7 +132,10 @@
 
 ### Экран подробной погоды (кнопка)
 - **`WEATHER_BUTTON_PIN` (GPIO4)** → GND: wakeup / показ деталей.
-- **`OTA_BUTTON_PIN` (GPIO2)** → просмотр OTA changelog / длинное удержание — установка.
+- **`OTA_BUTTON_PIN` (GPIO0, тот же что LED / сброс настроек)** → GND: просмотр changelog (короткое нажатие — страница), удержание ~2 с — установка. В активной фазе после отрисовки часов ~2.5 с окно опроса (из deep sleep GPIO0 **не** будит — иначе `INPUT_PULLUP` подсвечивает LED).
+- В простое / deep sleep GPIO0 = **OUTPUT LOW** (LED выключен).
+- Сброс WiFi по GPIO0: только при **power-on** (`ESP_RST_POWERON` / `EXT`), **удержание ~2 с**; не выполняется после `ESP.restart()`, deep sleep и wake по OTA-кнопке (иначе ложный SoftAP из‑за LED на том же пине).
+- Экран OTA **не** перехватывает GPIO4: погода по-прежнему на кнопке погоды.
 - `kWeatherDetailScreenCount = 7`, всего страниц `kDetailScreenCount = 8` (после погоды — статус).
 - Экран статуса: `ROM_VERSION`, дата/время последней успешной NTP (`lastSyncLocalEpoch`) и погоды (`lastSuccessfulWeatherLocalEpoch`).
 - Повторного HTTP нет — только RTC-кеш.
@@ -140,7 +143,7 @@
 
 ### OTA (web + AutoOTA)
 - Web OTA: `/ota` в setup mode; проверки OTA-partition, батареи, пароля AP; заливается application `.bin`.
-- AutoOTA: манифест `project.json`; индикатор на главном экране; ручное подтверждение через GPIO2.
+- AutoOTA: манифест `project.json`; индикатор на главном экране; ручное подтверждение через GPIO0.
 - Важно: библиотека AutoOTA считает update любую `version !=` текущей. В прошивке принимаем только **числово более новую** (`isRemoteFirmwareNewer`, напр. A1.4.10 > A1.4.9); иначе иконка/установка сбрасываются.
 
 ### Ограничение сетевого цикла

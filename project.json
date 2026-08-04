@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.11",
-  "releaseDate": "2026-08-03",
-  "whatsNew": "Экран статуса (версия, последняя NTP/погода). Опциональный прогресс синхронизации на OLED. Надёжнее WiFi в сетевом цикле.",
-  "notes": "A1.4.11: status page after weather; showSyncProgress; connectWifiSta without fixed channel; short retry on weather fail.",
+  "version": "A1.4.12",
+  "releaseDate": "2026-08-04",
+  "whatsNew": "OTA на GPIO0 (LED): листание changelog и hold-установка. Исправления SoftAP после Save и свечения LED от PULLUP.",
+  "notes": "A1.4.12: OTA button on GPIO0; factory reset only power-on+2s hold; LED OUTPUT LOW in sleep; OTA poll window after clock.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",

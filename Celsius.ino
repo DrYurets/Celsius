@@ -1,8 +1,8 @@
 /*
 * Celsius Clock
-* ROM version: A1.4.11
+* ROM version: A1.4.12
 * https://github.com/DrYurets/Celsius/tree/128x128
-* Date: 03.08.2026
+* Date: 04.08.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -22,6 +22,7 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <esp_sleep.h>
+#include <esp_system.h>
 #include <esp_ota_ops.h>
 #include <driver/adc.h>
 #include <driver/gpio.h>
@@ -40,7 +41,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.11"
+#define ROM_VERSION "A1.4.12"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -59,7 +60,7 @@
 #define LED_PIN 0
 #define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
-#define OTA_BUTTON_PIN 2
+#define OTA_BUTTON_PIN LED_PIN  // GPIO0: LED + кнопка сброса (boot) + OTA-info
 #define BMI160_INT1_PIN 5
 #define BAT_PIN 3          // GPIO 3
 #define SLEEP_US 950000UL  // 0,95 с
@@ -504,9 +505,10 @@ static float hum = 50.0;
 static bool indoorBmpOk = false;
 static bool displayOn = true;
 static bool wokeByWeatherButton = false;
+static bool wokeByOtaButton = false;
 static bool bmi160Ready = false;
 static bool runManualOtaInstall();
-static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs);
+static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs);
 /** -1 = пропуск, 0 = ошибка проверки, 1 = проверка ок (с update или без). */
 static int tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled);
 
@@ -555,8 +557,24 @@ bool isWeatherButtonPressed() {
   return readDebouncedLow(WEATHER_BUTTON_PIN);
 }
 
+/** GPIO0 совмещён с LED: перед чтением кнопки — INPUT_PULLUP. */
+static void otaButtonPrepareInput() {
+  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
+  gpio_pullup_en((gpio_num_t)OTA_BUTTON_PIN);
+  gpio_pulldown_dis((gpio_num_t)OTA_BUTTON_PIN);
+}
+
+static void ledPrepareOutputOff() {
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+}
+
 bool isOtaInfoButtonPressed() {
-  return readDebouncedLow(OTA_BUTTON_PIN);
+  otaButtonPrepareInput();
+  const bool pressed = readDebouncedLow(OTA_BUTTON_PIN);
+  // Не оставлять PULLUP: через него LED на GPIO0 горит «вполнакала».
+  ledPrepareOutputOff();
+  return pressed;
 }
 
 static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
@@ -596,6 +614,7 @@ static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
 }
 
 static void showOtaUpdateInfoScreen() {
+  otaButtonPrepareInput();
   const char *msg = otaAvailableMessage[0] ? otaAvailableMessage : "(no details)";
   const size_t msgLen = strnlen(msg, sizeof(otaAvailableMessage) - 1);
 
@@ -657,6 +676,10 @@ static void showOtaUpdateInfoScreen() {
   uint8_t page = 0;
   bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
   uint32_t lastActionMs = millis();
+  uint32_t pressStartMs = 0;
+  bool pressActive = false;
+  constexpr uint32_t kShortPressMaxMs = 400UL;
+  constexpr uint32_t kHoldInstallMs = 2000UL;
 
   auto drawPage = [&](uint8_t pageIdx) {
     uint8_t lineFrom = 0;
@@ -675,6 +698,8 @@ static void showOtaUpdateInfoScreen() {
       display.setCursor(0, 10);
       display.print("Date: ");
       display.println(otaAvailableDate[0] ? otaAvailableDate : "-");
+      display.setCursor(0, 24);
+      display.print("GPIO0: лист / hold");
       lineFrom = 0;
       rowCount = firstPageLines;
       textY0 = 40;
@@ -701,18 +726,43 @@ static void showOtaUpdateInfoScreen() {
   while ((uint32_t)(millis() - lastActionMs) < 9000UL) {
     bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
     if (low && !prevLow) {
-      // Долгое удержание => подтверждение установки. Короткое нажатие => следующая страница.
-      if (otaInfoButtonLongHoldConfirm(2000UL)) {
-        runManualOtaInstall();
-        return;
+      pressActive = true;
+      pressStartMs = millis();
+    }
+
+    if (low && pressActive) {
+      uint32_t held = (uint32_t)(millis() - pressStartMs);
+      if (held >= kShortPressMaxMs) {
+        // Долгое удержание: прогрессбар до kHoldInstallMs (учитываем уже удержанное).
+        if (otaInfoButtonLongHoldConfirm(kHoldInstallMs, held)) {
+          ledPrepareOutputOff();
+          runManualOtaInstall();
+          return;
+        }
+        // Отпустили до конца — вернуть текущую страницу.
+        pressActive = false;
+        drawPage(page);
+        lastActionMs = millis();
       }
-      page = (uint8_t)((page + 1U) % totalPages);
-      drawPage(page);
-      lastActionMs = millis();
+    }
+
+    if (!low && prevLow && pressActive) {
+      uint32_t held = (uint32_t)(millis() - pressStartMs);
+      pressActive = false;
+      if (held < kShortPressMaxMs) {
+        page = (uint8_t)((page + 1U) % totalPages);
+        drawPage(page);
+        lastActionMs = millis();
+      }
+    }
+
+    if (!low) {
+      pressActive = false;
     }
     prevLow = low;
     delay(20);
   }
+  ledPrepareOutputOff();
 }
 
 /** STA connect: channel 0 = любой (не фиксировать 15 — это не TX power). */
@@ -833,19 +883,23 @@ static bool runManualOtaInstall() {
   return true;
 }
 
-static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs) {
+static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs) {
   const uint32_t start = millis();
   const int16_t barX = 0;
   const int16_t barY = 112;
   const int16_t barW = 128;
   const int16_t barH = 7;
-  while ((uint32_t)(millis() - start) < holdMs) {
+  if (alreadyHeldMs >= holdMs) {
+    return digitalRead(OTA_BUTTON_PIN) == LOW;
+  }
+  const uint32_t needMore = holdMs - alreadyHeldMs;
+  while ((uint32_t)(millis() - start) < needMore) {
     if (digitalRead(OTA_BUTTON_PIN) != LOW) {
       return false;
     }
-    uint32_t elapsed = (uint32_t)(millis() - start);
+    uint32_t elapsed = alreadyHeldMs + (uint32_t)(millis() - start);
     uint32_t filled = (elapsed >= holdMs) ? (uint32_t)(barW - 2) : ((uint32_t)(barW - 2) * elapsed) / holdMs;
-    uint32_t leftMs = holdMs - elapsed;
+    uint32_t leftMs = (elapsed >= holdMs) ? 0UL : (holdMs - elapsed);
     applyDisplayOrientation();
     display.clearDisplay();
     display.setTextSize(1);
@@ -2091,14 +2145,9 @@ uint32_t runCycle() {
     applyDisplayOrientation();
 
     bool weatherButtonPressedNow = isWeatherButtonPressed();
-    if (otaUpdateAvailable && (wokeByWeatherButton || weatherButtonPressedNow)) {
+    bool otaButtonPressedNow = isOtaInfoButtonPressed();
+    if (otaUpdateAvailable && (wokeByOtaButton || otaButtonPressedNow)) {
       showOtaUpdateInfoScreen();
-      // Короткое нажатие — только просмотр. Удержание ~2с — подтверждение установки.
-      if (otaInfoButtonLongHoldConfirm(2000UL)) {
-        runManualOtaInstall();
-      } else {
-        delay(900);
-      }
     } else if (wokeByWeatherButton || weatherButtonPressedNow) {
       // Страницы погоды (0..6) + статус (7): версия, последняя NTP/погода.
       uint32_t detailEndMs = millis() + (uint32_t)settings.weatherScreenSeconds * 1000UL;
@@ -2156,6 +2205,23 @@ uint32_t runCycle() {
         drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
       }
     }
+
+    // GPIO0 не будит из сна (чтобы LED не светился от PULLUP): короткое окно после часов.
+    if (otaUpdateAvailable) {
+      otaButtonPrepareInput();
+      bool prevOtaLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
+      const uint32_t otaWaitEnd = millis() + 2500UL;
+      while ((int32_t)(millis() - otaWaitEnd) < 0) {
+        bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
+        if (low && !prevOtaLow) {
+          showOtaUpdateInfoScreen();
+          break;
+        }
+        prevOtaLow = low;
+        delay(20);
+      }
+      ledPrepareOutputOff();
+    }
   } else {
     display.clearDisplay();
     display.display();
@@ -2163,6 +2229,7 @@ uint32_t runCycle() {
   }
 
   if (timeValid && workdayEnabled && (ti.tm_min == 0) && !night && settings.hourlyBlink) {
+    ledPrepareOutputOff();
     digitalWrite(LED_PIN, HIGH);
     delay(80);
     digitalWrite(LED_PIN, LOW);
@@ -2213,10 +2280,13 @@ void enterDeepSleep(uint32_t sleepSeconds) {
     }
   }
 #endif
-  // Пробуждение: GPIO4 (кнопка погоды) по LOW. BMI160 не будит из сна — ориентация в runCycle.
+  // Пробуждение только GPIO4 (погода). GPIO0 = LED: в сне держим OUTPUT LOW,
+  // иначе INPUT_PULLUP подсвечивает светодиод всю минуту сна.
+  // OTA-кнопка читается в активной фазе (таймер / после иконки обновления).
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
+  ledPrepareOutputOff();
   esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
@@ -2225,35 +2295,54 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 void setup() {
   Serial.begin(9600);
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  esp_reset_reason_t resetReason = esp_reset_reason();
   wokeByWeatherButton = false;
+  wokeByOtaButton = false;
   if (wakeCause == ESP_SLEEP_WAKEUP_GPIO) {
     uint64_t wakeMask = esp_sleep_get_gpio_wakeup_status();
     wokeByWeatherButton = (wakeMask & (1ULL << WEATHER_BUTTON_PIN)) != 0;
+    wokeByOtaButton = (wakeMask & (1ULL << OTA_BUTTON_PIN)) != 0;
   }
 
-  // Сразу гасим светодиод, чтобы избежать вспышки при пробуждении
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  // GPIO0 = LED + кнопка: до проверки сброса не переводим в OUTPUT (иначе ложный LOW
+  // из‑за LED/ёмкости → clearWiFiConfig → вечный SoftAP после Save/restart).
+  otaButtonPrepareInput();
+  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
+  delay(20);
+
+  // Сброс WiFi/настроек: только холодный power-on (не ESP.restart / deep sleep),
+  // не после wake по OTA-кнопке, и только при удержании GPIO0 ~2 с.
+  const bool allowFactoryReset =
+      !wokeByOtaButton &&
+      (resetReason == ESP_RST_POWERON || resetReason == ESP_RST_EXT);
+  bool resetRequested = false;
+  if (allowFactoryReset && digitalRead(LED_PIN) == LOW) {
+    resetRequested = true;
+    const uint32_t holdStart = millis();
+    while ((uint32_t)(millis() - holdStart) < 2000UL) {
+      if (digitalRead(LED_PIN) != LOW) {
+        resetRequested = false;
+        break;
+      }
+      delay(10);
+    }
+  }
+  bool setupModeRequested = (digitalRead(SETUP_BUTTON_PIN) == LOW);
+  ledPrepareOutputOff();
 
   setCpuLowPower();
-  delay(100);
-
-  // Проверка сброса настроек: если LED_PIN (GPIO 0) замкнут на землю при старте
-  // Кратковременно переключаем на вход для проверки
-  pinMode(LED_PIN, INPUT_PULLUP);
-  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
-  delayMicroseconds(100);  // Минимальная задержка для стабилизации
-  bool resetRequested = (digitalRead(LED_PIN) == LOW);
-  bool setupModeRequested = (digitalRead(SETUP_BUTTON_PIN) == LOW);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
 
   if (resetRequested) {
-    // GPIO был замкнут на землю - сбрасываем настройки
     clearWiFiConfig();
-    Serial.println("Config reset by GPIO0 at boot");
-    delay(2000);
+    Serial.println("Config reset by GPIO0 hold at power-on");
+    delay(500);
   }
+  Serial.printf("Boot: wake=%d rst=%d otaWake=%d resetCfg=%d setupBtn=%d\n",
+                (int)wakeCause,
+                (int)resetReason,
+                (int)wokeByOtaButton,
+                (int)resetRequested,
+                (int)setupModeRequested);
 
   analogSetPinAttenuation(BAT_PIN, ADC_11db);
   pinMode(BAT_PIN, INPUT);
@@ -2306,10 +2395,12 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
   Serial.printf("Weather button GPIO%d state=%d\n", WEATHER_BUTTON_PIN, digitalRead(WEATHER_BUTTON_PIN));
+  otaButtonPrepareInput();
+  Serial.printf("OTA/LED button GPIO%d state=%d\n", OTA_BUTTON_PIN, digitalRead(OTA_BUTTON_PIN));
+  ledPrepareOutputOff();
   if (settings.bmi160Enabled) {
     pinMode(BMI160_INT1_PIN, INPUT_PULLDOWN);
     gpio_pullup_dis((gpio_num_t)BMI160_INT1_PIN);

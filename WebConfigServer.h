@@ -219,9 +219,9 @@ String getConfigPage() {
 
   html += "<hr style='margin: 20px 0; border-color: #555;'>";
   html += "<h2>Firmware OTA</h2>";
-  html += "<p style='font-size: 12px; color: #ffb74d; margin-top: 0;'>Do not power off during update. The firmware filename must be exactly <b>Celsius.ino.bin</b>.</p>";
+  html += "<p style='font-size: 12px; color: #ffb74d; margin-top: 0;'>Do not power off during update.</p>";
   html += "<form method='POST' action='/ota' enctype='multipart/form-data'>";
-  html += "<label>Firmware file (.bin):</label>";
+  html += "<label>Firmware file (Celsius.ino.bin):</label>";
   html += "<input type='file' id='firmwareFile' name='firmware' accept='.bin,application/octet-stream' required>";
   html += "<button type='submit' style='background: #ff9800; margin-top: 10px;'>Update Firmware (OTA)</button>";
   html += "</form>";
