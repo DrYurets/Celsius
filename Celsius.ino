@@ -2,7 +2,7 @@
 * Celsius Clock
 * ROM version: A1.4.12
 * https://github.com/DrYurets/Celsius/tree/128x128
-* Date: 04.08.2026
+* Date: 05.08.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -50,6 +50,7 @@
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
 #define SSD1306_WHITE 1
+#define SSD1306_BLACK 0
 #define SSD1306_SWITCHCAPVCC 0
 #define SHT31_ADDR 0x44
 #define AHT20_ADDR 0x38
@@ -266,11 +267,23 @@ class OledDisplayCompat {
     }
     oled_.drawRect(x, y, w, h, SH110X_WHITE);
   }
-  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
     if (w <= 0 || h <= 0) {
       return;
     }
-    oled_.fillRect(x, y, w, h, SH110X_WHITE);
+    oled_.fillRect(x, y, w, h, color ? SH110X_WHITE : SH110X_BLACK);
+  }
+  void drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint16_t color) {
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawRoundRect(x, y, w, h, r, color ? SH110X_WHITE : SH110X_BLACK);
+  }
+  void fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint16_t color) {
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.fillRoundRect(x, y, w, h, r, color ? SH110X_WHITE : SH110X_BLACK);
   }
   void drawBitmap(int16_t x, int16_t y, const uint8_t *bmp, int16_t w, int16_t h, uint16_t) {
     if (!bmp || w <= 0 || h <= 0) {
@@ -509,8 +522,14 @@ static bool wokeByOtaButton = false;
 static bool bmi160Ready = false;
 static bool runManualOtaInstall();
 static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs);
+static bool factoryResetHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs);
+static void performFactoryResetAndReboot(const char *reason);
 /** -1 = пропуск, 0 = ошибка проверки, 1 = проверка ок (с update или без). */
 static int tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workdayEnabled);
+
+static constexpr uint32_t kFactoryResetBootHoldMs = 2000UL;
+static constexpr uint32_t kFactoryResetRuntimeHoldMs = 5000UL;
+static constexpr uint32_t kOtaShortClickMaxMs = 800UL;
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
@@ -920,6 +939,64 @@ static bool otaInfoButtonLongHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs
     delay(30);
   }
   return true;
+}
+
+static bool factoryResetHoldConfirm(uint32_t holdMs, uint32_t alreadyHeldMs) {
+  const uint32_t start = millis();
+  const int16_t barX = 0;
+  const int16_t barY = 112;
+  const int16_t barW = 128;
+  const int16_t barH = 7;
+  if (alreadyHeldMs >= holdMs) {
+    return digitalRead(OTA_BUTTON_PIN) == LOW;
+  }
+  const uint32_t needMore = holdMs - alreadyHeldMs;
+  while ((uint32_t)(millis() - start) < needMore) {
+    if (digitalRead(OTA_BUTTON_PIN) != LOW) {
+      return false;
+    }
+    uint32_t elapsed = alreadyHeldMs + (uint32_t)(millis() - start);
+    uint32_t filled = (elapsed >= holdMs) ? (uint32_t)(barW - 2) : ((uint32_t)(barW - 2) * elapsed) / holdMs;
+    uint32_t leftMs = (elapsed >= holdMs) ? 0UL : (holdMs - elapsed);
+    applyDisplayOrientation();
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("Settings reset");
+    display.setCursor(0, 14);
+    display.println("Hold GPIO0...");
+    char timerBuf[20];
+    snprintf(timerBuf, sizeof(timerBuf), "%lu.%lus left",
+             (unsigned long)(leftMs / 1000UL),
+             (unsigned long)((leftMs % 1000UL) / 100UL));
+    display.setCursor(0, 28);
+    display.println(timerBuf);
+    display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
+    if (filled > 0) {
+      display.fillRect(barX + 1, barY + 1, (int16_t)filled, barH - 2, SSD1306_WHITE);
+    }
+    display.display();
+    delay(30);
+  }
+  return true;
+}
+
+static void performFactoryResetAndReboot(const char *reason) {
+  clearWiFiConfig();
+  Serial.printf("Config reset (%s)\n", reason ? reason : "GPIO0");
+  applyDisplayOrientation();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(CODE_CONFIG_RESET);
+  display.setCursor(0, 14);
+  display.println("WiFi cleared");
+  display.setCursor(0, 28);
+  display.println("Rebooting...");
+  display.display();
+  ledPrepareOutputOff();
+  delay(1200);
+  ESP.restart();
 }
 
 void applyDisplayOrientation() {
@@ -1586,28 +1663,55 @@ static int tryAutoOtaUpdate(time_t local, bool timeValid, bool night, bool workd
 #endif
 }
 
-// Иконка батареи (как на телефоне): контур + заполнение по уровню заряда, в правом верхнем углу
+// Иконка батареи (как на телефоне): скруглённый корпус, заливка без пустых углов
 void drawBattery(uint8_t bars) {
   const int16_t bodyW = 20;
   const int16_t bodyH = 10;
   const int16_t tabW = 2;
   const int16_t tabH = 4;
+  const int16_t radius = 2;
+  const int16_t r2 = radius * radius;
   int16_t right = (int16_t)display.width();
-  int16_t bx = right - tabW - bodyW;  // левый край корпуса
+  int16_t bx = right - tabW - bodyW;
+  const int16_t tabY = (bodyH - tabH) / 2;
 
-  // контур корпуса
-  display.drawRect(bx, 0, bodyW, bodyH, SSD1306_WHITE);
-  // контур «носика» (плюс) справа по центру
-  display.drawRect(right - tabW, (bodyH - tabH) / 2, tabW, tabH, SSD1306_WHITE);
+  const int16_t innerW = bodyW - 2;
+  const int16_t fillLimit =
+      (bars >= BAT_STEPS) ? bodyW
+                          : (int16_t)(1 + (int16_t)((uint32_t)bars * innerW / BAT_STEPS));
 
-  // заполнение по уровню (0..BAT_STEPS)
+  // Заливка тем же скруглением, что и контур (без «дыр» в углах)
   if (bars > 0) {
-    int16_t innerW = bodyW - 2;
-    int16_t fillW = (int16_t)((uint32_t)bars * innerW / BAT_STEPS);
-    if (fillW > 0) {
-      display.fillRect(bx + 1, 1, fillW, bodyH - 2, SSD1306_WHITE);
+    for (int16_t py = 0; py < bodyH; ++py) {
+      for (int16_t px = 0; px < bodyW; ++px) {
+        bool inside = true;
+        if (px < radius && py < radius) {
+          const int16_t dx = (int16_t)(px - radius);
+          const int16_t dy = (int16_t)(py - radius);
+          inside = (dx * dx + dy * dy) <= r2;
+        } else if (px >= bodyW - radius && py < radius) {
+          const int16_t dx = (int16_t)(px - (bodyW - 1 - radius));
+          const int16_t dy = (int16_t)(py - radius);
+          inside = (dx * dx + dy * dy) <= r2;
+        } else if (px < radius && py >= bodyH - radius) {
+          const int16_t dx = (int16_t)(px - radius);
+          const int16_t dy = (int16_t)(py - (bodyH - 1 - radius));
+          inside = (dx * dx + dy * dy) <= r2;
+        } else if (px >= bodyW - radius && py >= bodyH - radius) {
+          const int16_t dx = (int16_t)(px - (bodyW - 1 - radius));
+          const int16_t dy = (int16_t)(py - (bodyH - 1 - radius));
+          inside = (dx * dx + dy * dy) <= r2;
+        }
+        if (!inside || px >= fillLimit) {
+          continue;
+        }
+        display.fillRect((int16_t)(bx + px), py, 1, 1, SSD1306_WHITE);
+      }
     }
   }
+
+  display.drawRoundRect(bx, 0, bodyW, bodyH, radius, SSD1306_WHITE);
+  display.fillRect(right - tabW, tabY, tabW, tabH, SSD1306_WHITE);
 }
 
 static void drawOtaAvailableIcon(int16_t x) {
@@ -1759,15 +1863,20 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
     }
 
     char popBuf[8];
-    if (isnan(weatherPrecipProbabilityPct)) {
-      snprintf(popBuf, sizeof(popBuf), "--%%");
-    } else {
-      snprintf(popBuf, sizeof(popBuf), "%d%%", (int)lroundf(weatherPrecipProbabilityPct));
+    bool showPop = false;
+    if (!isnan(weatherPrecipProbabilityPct)) {
+      const int popPct = (int)lroundf(weatherPrecipProbabilityPct);
+      if (popPct > 0) {
+        snprintf(popBuf, sizeof(popBuf), "%d%%", popPct);
+        showPop = true;
+      }
     }
-    tw = display.getTextWidth(popBuf);
-    tX = (int16_t)(iconX + (iconSize - tw) / 2);
-    display.setCursor(tX, (int16_t)(underIconY + 12));
-    display.print(popBuf);
+    if (showPop) {
+      tw = display.getTextWidth(popBuf);
+      tX = (int16_t)(iconX + (iconSize - tw) / 2);
+      display.setCursor(tX, (int16_t)(underIconY + 12));
+      display.print(popBuf);
+    }
 
     // Три колонки: час → иконка → T → PoP (всегда h+1, h+2, h+3)
     int8_t colHour[kWeatherHourlyAheadCount];
@@ -1791,8 +1900,20 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       }
       display.setTextSize(1);
       tw = display.getTextWidth(hourBuf);
-      display.setCursor((int16_t)(colCenter - tw / 2), colY0);
+      // Две ° после часа → визуально «HH°°» ≈ прогноз на HH:00
+      constexpr int16_t kHourDegW = 3;
+      constexpr int16_t kHourDegGap = 1;
+      const int16_t hourMarksW =
+          (colHour[k] >= 0) ? (int16_t)(1 + kHourDegW + kHourDegGap + kHourDegW) : 0;
+      const int16_t hourTotalW = (int16_t)(tw + hourMarksW);
+      const int16_t hourX = (int16_t)(colCenter - hourTotalW / 2);
+      display.setCursor(hourX, colY0);
       display.print(hourBuf);
+      if (colHour[k] >= 0) {
+        const int16_t d0 = (int16_t)(hourX + tw + 1);
+        drawDegreeMark(d0, colY0);
+        drawDegreeMark((int16_t)(d0 + kHourDegW + kHourDegGap), colY0);
+      }
 
       const int16_t iconY = (int16_t)(colY0 + 12);
       const int colH = (colHour[k] >= 0) ? (int)colHour[k] : ((h + 1 + k) % 24);
@@ -1812,15 +1933,16 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
         drawDegreeMark((int16_t)(txCol + tw + 1), tempY);
       }
 
-      char pCol[8];
-      if (isnan(colPop[k])) {
-        snprintf(pCol, sizeof(pCol), "--%%");
-      } else {
-        snprintf(pCol, sizeof(pCol), "%d%%", (int)lroundf(colPop[k]));
+      if (!isnan(colPop[k])) {
+        const int popPct = (int)lroundf(colPop[k]);
+        if (popPct > 0) {
+          char pCol[8];
+          snprintf(pCol, sizeof(pCol), "%d%%", popPct);
+          tw = display.getTextWidth(pCol);
+          display.setCursor((int16_t)(colCenter - tw / 2), (int16_t)(tempY + 12));
+          display.print(pCol);
+        }
       }
-      tw = display.getTextWidth(pCol);
-      display.setCursor((int16_t)(colCenter - tw / 2), (int16_t)(tempY + 12));
-      display.print(pCol);
     }
   }
 
@@ -2206,18 +2328,52 @@ uint32_t runCycle() {
       }
     }
 
-    // GPIO0 не будит из сна (чтобы LED не светился от PULLUP): короткое окно после часов.
-    if (otaUpdateAvailable) {
+    // GPIO0: короткое нажатие → OTA (если есть), удержание ~5 с → сброс WiFi/настроек.
+    // Из deep sleep GPIO0 не будит (LED), поэтому опрос в активной фазе после часов.
+    {
       otaButtonPrepareInput();
-      bool prevOtaLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
-      const uint32_t otaWaitEnd = millis() + 2500UL;
-      while ((int32_t)(millis() - otaWaitEnd) < 0) {
-        bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
-        if (low && !prevOtaLow) {
-          showOtaUpdateInfoScreen();
+      const uint32_t waitEnd = millis() + 3000UL;
+      uint32_t pressAt = 0;
+      bool holding = false;
+      bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
+      if (prevLow) {
+        holding = true;
+        pressAt = millis();
+      }
+      bool didAction = false;
+      while (!didAction) {
+        const uint32_t now = millis();
+        const bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
+        if (low && !prevLow) {
+          holding = true;
+          pressAt = now;
+        }
+        if (holding && low) {
+          const uint32_t held = (uint32_t)(now - pressAt);
+          if (held >= 800UL) {
+            // Показать прогресс сброса; при полном удержании — сброс
+            if (factoryResetHoldConfirm(kFactoryResetRuntimeHoldMs, held)) {
+              performFactoryResetAndReboot("GPIO0 hold after clock");
+            }
+            // Отпустили раньше 5 с — вернуть главный экран и выйти из окна
+            drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
+            didAction = true;
+            break;
+          }
+        }
+        if (!low && prevLow && holding) {
+          const uint32_t held = (uint32_t)(now - pressAt);
+          holding = false;
+          if (held < kOtaShortClickMaxMs && otaUpdateAvailable) {
+            showOtaUpdateInfoScreen();
+          }
+          didAction = true;
           break;
         }
-        prevOtaLow = low;
+        prevLow = low;
+        if (!holding && !low && (int32_t)(now - waitEnd) >= 0) {
+          break;
+        }
         delay(20);
       }
       ledPrepareOutputOff();
@@ -2310,17 +2466,20 @@ void setup() {
   pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
   delay(20);
 
-  // Сброс WiFi/настроек: только холодный power-on (не ESP.restart / deep sleep),
-  // не после wake по OTA-кнопке, и только при удержании GPIO0 ~2 с.
-  const bool allowFactoryReset =
-      !wokeByOtaButton &&
-      (resetReason == ESP_RST_POWERON || resetReason == ESP_RST_EXT);
+  // Сброс WiFi: не после ESP.restart() и не после deep sleep (ложный SoftAP / LED).
+  // Иначе — холодный старт / USB / EXT и т.п. при удержании GPIO0 ~2 с.
+  const bool fromDeepSleep =
+      (wakeCause == ESP_SLEEP_WAKEUP_GPIO) ||
+      (wakeCause == ESP_SLEEP_WAKEUP_TIMER) ||
+      (resetReason == ESP_RST_DEEPSLEEP);
+  const bool fromSoftRestart = (resetReason == ESP_RST_SW);
+  const bool allowFactoryReset = !fromDeepSleep && !fromSoftRestart && !wokeByOtaButton;
   bool resetRequested = false;
-  if (allowFactoryReset && digitalRead(LED_PIN) == LOW) {
+  if (allowFactoryReset && digitalRead(OTA_BUTTON_PIN) == LOW) {
     resetRequested = true;
     const uint32_t holdStart = millis();
-    while ((uint32_t)(millis() - holdStart) < 2000UL) {
-      if (digitalRead(LED_PIN) != LOW) {
+    while ((uint32_t)(millis() - holdStart) < kFactoryResetBootHoldMs) {
+      if (digitalRead(OTA_BUTTON_PIN) != LOW) {
         resetRequested = false;
         break;
       }
@@ -2334,7 +2493,7 @@ void setup() {
 
   if (resetRequested) {
     clearWiFiConfig();
-    Serial.println("Config reset by GPIO0 hold at power-on");
+    Serial.println("Config reset by GPIO0 hold at boot");
     delay(500);
   }
   Serial.printf("Boot: wake=%d rst=%d otaWake=%d resetCfg=%d setupBtn=%d\n",

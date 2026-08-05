@@ -132,9 +132,14 @@
 
 ### Экран подробной погоды (кнопка)
 - **`WEATHER_BUTTON_PIN` (GPIO4)** → GND: wakeup / показ деталей.
-- **`OTA_BUTTON_PIN` (GPIO0, тот же что LED / сброс настроек)** → GND: просмотр changelog (короткое нажатие — страница), удержание ~2 с — установка. В активной фазе после отрисовки часов ~2.5 с окно опроса (из deep sleep GPIO0 **не** будит — иначе `INPUT_PULLUP` подсвечивает LED).
+- **`OTA_BUTTON_PIN` (GPIO0, тот же что LED / сброс настроек)** → GND:
+  - короткое нажатие (если есть обновление) — changelog OTA;
+  - на экране OTA удержание ~2 с — установка;
+  - **удержание ~5 с после главного экрана** — сброс WiFi (`clearWiFiConfig`) и reboot в SoftAP;
+  - при **загрузке** (не deep sleep / не `ESP.restart`): удержание ~2 с — тот же сброс.
+  В активной фазе после отрисовки часов ~3 с окно опроса (из deep sleep GPIO0 **не** будит — иначе `INPUT_PULLUP` подсвечивает LED).
 - В простое / deep sleep GPIO0 = **OUTPUT LOW** (LED выключен).
-- Сброс WiFi по GPIO0: только при **power-on** (`ESP_RST_POWERON` / `EXT`), **удержание ~2 с**; не выполняется после `ESP.restart()`, deep sleep и wake по OTA-кнопке (иначе ложный SoftAP из‑за LED на том же пине).
+- Сброс WiFi по GPIO0 при boot: не после `ESP.restart()` и не после deep sleep (иначе ложный SoftAP из‑за LED на том же пине); при cold/USB/EXT — удержание ~2 с.
 - Экран OTA **не** перехватывает GPIO4: погода по-прежнему на кнопке погоды.
 - `kWeatherDetailScreenCount = 7`, всего страниц `kDetailScreenCount = 8` (после погоды — статус).
 - Экран статуса: `ROM_VERSION`, дата/время последней успешной NTP (`lastSyncLocalEpoch`) и погоды (`lastSuccessfulWeatherLocalEpoch`).
