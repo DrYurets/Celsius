@@ -16,7 +16,7 @@
 - (ветки `128x64` / `128x128`) может переворачивать экран по BMI160 и показывать 7 экранов детальной погоды (+ экран статуса на `128x128`).
 
 ## Не ломать инварианты (самое важное)
-1. **Deep sleep и расписание пробуждения**: логика `runCycle()` возвращает число секунд до следующего пробуждения, затем вызывается `esp_deep_sleep_start()`. Любые новые сетевые/тяжёлые действия должны быть встроены так, чтобы не ломать сон и не увеличивать время активной фазы без необходимости.
+1. **Deep sleep и расписание пробуждения**: логика `runCycle()` возвращает число секунд до следующего пробуждения, затем вызывается `esp_deep_sleep_start()`. Ночью (`night && workdayEnabled`) — сон до `nightEnd`, не каждую минуту; GPIO4 по-прежнему будит. Любые новые сетевые/тяжёлые действия должны быть встроены так, чтобы не ломать сон и не увеличивать время активной фазы без необходимости.
 2. **WiFi**: часы не держат WiFi включенным постоянно. WiFi подключается при необходимости (NTP и/или погода и/или AutoOTA), затем должен отключаться.
 3. **Сетевой цикл (NTP + погода)**: выполняется только в активном дневном режиме (`timeValid`, `workdayEnabled`, `!night`) и когда истёк интервал `settings.weatherUpdateHours` (`shouldUpdateNetwork`). В одном WiFi-сеансе: NTP → (опционально) AutoOTA → (если `weatherEnabled`) погода.
 4. **EEPROM layout**: настройки хранятся в EEPROM по фиксированным адресам; `EEPROM_SIZE` должен быть достаточным для всей структуры `DeviceSettings`.
@@ -78,7 +78,8 @@
 
 ### RTC drift compensation
 - Дрейф: `RTC_DATA_ATTR int32_t driftCorrectionMs`, опора — `lastSyncLocalEpoch`.
-- `applyDriftCorrection` / `applyTimeCorrection` (сек/сутки из настроек).
+- `applyDriftCorrection` / `applyTimeCorrection` (сек/сутки из настроек) — **только при чтении** перед отрисовкой/сетью.
+- `storedEpoch` при уходе в сон увеличивается на elapsed **без** `timeCorrectionPerDay` (иначе коррекция учитывалась дважды).
 - В `runCycle()` перед отрисовкой: `storedEpoch` + поправки.
 
 ### Хранение epoch
@@ -115,6 +116,7 @@
   - `current.temperature_2m`, `current.weather_code`, PoP из matching `hourly` часа;
   - `hourly` / `daily` для детальных экранов и главного экрана;
   - URL до 767 символов (`weatherApiUrl[768]`), дефолт `latitude=53.92&longitude=30.35`.
+  - `timezone` в URL строится из `settings.timezoneMinutes` (`Etc/GMT±N` с инверсией знака; нецелые часы → `auto`); `rebuildOpenMeteoUrlFromCoordinates()` при load/save.
 
 ### RTC-кеш hourly для главного экрана
 - При успешном fetch: до **24** слотов от текущего часа API (`weatherHourlyHour/TempC/PrecipPct/WmoCode`, `weatherHourlyValidCount`).
@@ -137,7 +139,7 @@
   - на экране OTA удержание ~2 с — установка;
   - **удержание ~5 с после главного экрана** — сброс WiFi (`clearWiFiConfig`) и reboot в SoftAP;
   - при **загрузке** (не deep sleep / не `ESP.restart`): удержание ~2 с — тот же сброс.
-  В активной фазе после отрисовки часов ~3 с окно опроса (из deep sleep GPIO0 **не** будит — иначе `INPUT_PULLUP` подсвечивает LED).
+  В активной фазе после отрисовки часов: idle-окно **~0.4 с** (или ~2.5 с, если есть OTA); опрос GPIO0 **импульсами** (PULLUP → read → OUTPUT LOW), чтобы LED не светился вполнакала. При удержании — continuous INPUT для UI сброса/OTA. Из deep sleep GPIO0 **не** будит.
 - В простое / deep sleep GPIO0 = **OUTPUT LOW** (LED выключен).
 - Сброс WiFi по GPIO0 при boot: не после `ESP.restart()` и не после deep sleep (иначе ложный SoftAP из‑за LED на том же пине); при cold/USB/EXT — удержание ~2 с.
 - Экран OTA **не** перехватывает GPIO4: погода по-прежнему на кнопке погоды.

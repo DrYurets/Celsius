@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.12",
-  "releaseDate": "2026-08-04",
-  "whatsNew": "OTA на GPIO0 (LED): листание changelog и hold-установка. Исправления SoftAP после Save и свечения LED от PULLUP.",
-  "notes": "A1.4.12: OTA button on GPIO0; factory reset only power-on+2s hold; LED OUTPUT LOW in sleep; OTA poll window after clock.",
+  "version": "A1.4.13",
+  "releaseDate": "2026-08-05",
+  "whatsNew": "Ночной сон до nightEnd; timezone Open-Meteo из настроек; без двойной timeCorrection; сброс GPIO0 (boot 2с / hold 5с); LED без свечения от PULLUP (импульсный опрос).",
+  "notes": "A1.4.13: night sleep to nightEnd; Open-Meteo TZ from timezoneMinutes; timeCorrection overlay-only; factory reset boot+runtime; GPIO0 pulse sample.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",

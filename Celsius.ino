@@ -1,6 +1,6 @@
 /*
 * Celsius Clock
-* ROM version: A1.4.12
+* ROM version: A1.4.13
 * https://github.com/DrYurets/Celsius/tree/128x128
 * Date: 05.08.2026
 * Copyright (c) 2026 DrYurets
@@ -41,7 +41,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.12"
+#define ROM_VERSION "A1.4.13"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -463,7 +463,7 @@ static DeviceSettings settings = {
   .weatherSource = WEATHER_SOURCE_OPEN_METEO,
   .weatherLatitude = DEFAULT_WEATHER_LAT,
   .weatherLongitude = DEFAULT_WEATHER_LON,
-  .weatherApiUrl = "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Europe%2FMoscow&past_days=0&forecast_days=4&wind_speed_unit=ms",
+  .weatherApiUrl = "https://api.open-meteo.com/v1/forecast?latitude=53.92&longitude=30.35&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Etc%2FGMT-3&past_days=0&forecast_days=4&wind_speed_unit=ms",
   .weatherUpdateHours = 1,
   .weatherScreenSeconds = 10,
   .tempSensorType = TEMP_SENSOR_SHT31,
@@ -496,6 +496,28 @@ static long getTimezoneOffsetSeconds() {
   return (long)settings.timezoneMinutes * 60L;
 }
 
+/** Open-Meteo timezone=… from settings.timezoneMinutes (Etc/GMT has inverted sign). */
+static void formatOpenMeteoTimezoneParam(char *out, size_t outSize, int16_t tzMinutes) {
+  if (!out || outSize == 0) {
+    return;
+  }
+  if ((tzMinutes % 60) != 0) {
+    // Получасовые пояса: пусть API выберет TZ по lat/lon
+    snprintf(out, outSize, "auto");
+    return;
+  }
+  const int hours = (int)tzMinutes / 60;
+  if (hours == 0) {
+    snprintf(out, outSize, "UTC");
+  } else if (hours > 0) {
+    // UTC+N → Etc/GMT-N
+    snprintf(out, outSize, "Etc/GMT-%d", hours);
+  } else {
+    // UTC-N → Etc/GMT+N (в URL '+' → %2B)
+    snprintf(out, outSize, "Etc/GMT+%d", -hours);
+  }
+}
+
 static bool isValidLatitude(float lat) {
   return isfinite(lat) && lat >= -90.0f && lat <= 90.0f;
 }
@@ -505,11 +527,47 @@ static bool isValidLongitude(float lon) {
 }
 
 static void rebuildOpenMeteoUrlFromCoordinates() {
+  char tz[24];
+  formatOpenMeteoTimezoneParam(tz, sizeof(tz), settings.timezoneMinutes);
+  char tzEnc[40];
+  if (strcmp(tz, "auto") == 0 || strcmp(tz, "UTC") == 0) {
+    snprintf(tzEnc, sizeof(tzEnc), "%s", tz);
+  } else if (strncmp(tz, "Etc/GMT+", 8) == 0) {
+    snprintf(tzEnc, sizeof(tzEnc), "Etc%%2FGMT%%2B%s", tz + 8);
+  } else if (strncmp(tz, "Etc/GMT-", 8) == 0) {
+    snprintf(tzEnc, sizeof(tzEnc), "Etc%%2FGMT-%s", tz + 8);
+  } else {
+    snprintf(tzEnc, sizeof(tzEnc), "auto");
+  }
   snprintf(settings.weatherApiUrl,
            WEATHER_API_URL_BUF_SIZE,
-           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=Europe%%2FMoscow&past_days=0&forecast_days=4&wind_speed_unit=ms",
+           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&daily=weather_code,sunrise,sunset&hourly=temperature_2m,relative_humidity_2m,surface_pressure,apparent_temperature,wind_speed_10m,weather_code,precipitation_probability,precipitation,wind_direction_10m&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m&timezone=%s&past_days=0&forecast_days=4&wind_speed_unit=ms",
            settings.weatherLatitude,
-           settings.weatherLongitude);
+           settings.weatherLongitude,
+           tzEnc);
+}
+
+/** Секунды до конца ночного режима (local wall clock). */
+static uint32_t secondsUntilNightEnd(int hour, int min, int sec) {
+  const int nowSec = hour * 3600 + min * 60 + sec;
+  const int startSec = (int)settings.nightStartH * 3600 + (int)settings.nightStartM * 60;
+  const int endSec = (int)settings.nightEndH * 3600 + (int)settings.nightEndM * 60;
+  int delta;
+  if (startSec < endSec) {
+    // Ночь в пределах суток (напр. 01:00–07:00)
+    delta = endSec - nowSec;
+  } else {
+    // Ночь через полночь (напр. 23:00–07:00)
+    if (nowSec >= startSec) {
+      delta = (24 * 3600 - nowSec) + endSec;
+    } else {
+      delta = endSec - nowSec;
+    }
+  }
+  if (delta <= 0) {
+    delta = 60;
+  }
+  return (uint32_t)delta;
 }
 
 static bool sensorOK = false;
@@ -586,6 +644,15 @@ static void otaButtonPrepareInput() {
 static void ledPrepareOutputOff() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+}
+
+/** Краткий sample: PULLUP → read → сразу OUTPUT LOW (иначе LED «вполнакала» на всё окно). */
+static bool otaButtonSampleLow() {
+  otaButtonPrepareInput();
+  delayMicroseconds(40);
+  const bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
+  ledPrepareOutputOff();
+  return low;
 }
 
 bool isOtaInfoButtonPressed() {
@@ -1086,8 +1153,7 @@ time_t applyTimeCorrection(time_t baseEpoch, time_t referenceEpoch) {
   if (elapsed <= 0) {
     return baseEpoch;
   }
-  // Применяем коррекцию: за каждую секунду реального времени добавляем/вычитаем
-  // timeCorrectionPerDay / 86400 секунд
+  // Только overlay при чтении: storedEpoch двигаем без этой поправки (иначе двойной учёт).
   int64_t correctionSeconds = ((int64_t)elapsed * (int64_t)settings.timeCorrectionPerDay) / 86400LL;
   return baseEpoch + (time_t)correctionSeconds;
 }
@@ -2328,14 +2394,14 @@ uint32_t runCycle() {
       }
     }
 
-    // GPIO0: короткое нажатие → OTA (если есть), удержание ~5 с → сброс WiFi/настроек.
-    // Из deep sleep GPIO0 не будит (LED), поэтому опрос в активной фазе после часов.
+    // GPIO0: короткое нажатие → OTA (если есть), удержание ~5 с → сброс WiFi.
+    // Sample импульсами (не держим PULLUP — иначе LED горит вполнакала всё окно).
     {
-      otaButtonPrepareInput();
-      const uint32_t waitEnd = millis() + 3000UL;
+      const uint32_t idleWaitMs = otaUpdateAvailable ? 2500UL : 400UL;
+      const uint32_t waitEnd = millis() + idleWaitMs;
       uint32_t pressAt = 0;
       bool holding = false;
-      bool prevLow = (digitalRead(OTA_BUTTON_PIN) == LOW);
+      bool prevLow = otaButtonSampleLow();
       if (prevLow) {
         holding = true;
         pressAt = millis();
@@ -2343,7 +2409,7 @@ uint32_t runCycle() {
       bool didAction = false;
       while (!didAction) {
         const uint32_t now = millis();
-        const bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
+        const bool low = otaButtonSampleLow();
         if (low && !prevLow) {
           holding = true;
           pressAt = now;
@@ -2351,11 +2417,11 @@ uint32_t runCycle() {
         if (holding && low) {
           const uint32_t held = (uint32_t)(now - pressAt);
           if (held >= 800UL) {
-            // Показать прогресс сброса; при полном удержании — сброс
+            otaButtonPrepareInput();  // continuous read на экране сброса
             if (factoryResetHoldConfirm(kFactoryResetRuntimeHoldMs, held)) {
               performFactoryResetAndReboot("GPIO0 hold after clock");
             }
-            // Отпустили раньше 5 с — вернуть главный экран и выйти из окна
+            ledPrepareOutputOff();
             drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
             didAction = true;
             break;
@@ -2398,6 +2464,9 @@ uint32_t runCycle() {
       if (sleepSeconds == 0) {
         sleepSeconds = 60;
       }
+    } else if (night) {
+      // Не будить каждую минуту ночью — сон до nightEnd (GPIO4 всё ещё будит).
+      sleepSeconds = secondsUntilNightEnd(ti.tm_hour, ti.tm_min, ti.tm_sec);
     } else {
       int secToNextMinute = 60 - ti.tm_sec;
       if (secToNextMinute <= 0) {
@@ -2408,14 +2477,8 @@ uint32_t runCycle() {
     uint32_t activeSeconds = ((millis() - cycleStartMs) + 500) / 1000;
     uint32_t elapsedSeconds = activeSeconds + sleepSeconds;
 
-    // Применяем коррекцию времени к storedEpoch
-    if (settings.timeCorrectionPerDay != 0 && lastSyncLocalEpoch > 0) {
-      // Вычисляем коррекцию для прошедшего времени
-      int64_t correctionSeconds = ((int64_t)elapsedSeconds * (int64_t)settings.timeCorrectionPerDay) / 86400LL;
-      storedEpoch = storedEpoch + elapsedSeconds + (time_t)correctionSeconds;
-    } else {
-      storedEpoch = storedEpoch + elapsedSeconds;
-    }
+    // storedEpoch — «сырое» RTC-время; ручная коррекция только в applyTimeCorrection().
+    storedEpoch = storedEpoch + elapsedSeconds;
   } else {
     sleepSeconds = 30;
   }
