@@ -618,16 +618,17 @@ void updateConfigModeDisplay() {
   display.setTextSize(1);
   display.setCursor(12, 0);
   display.println("--- НАСТРОЙКИ ---");
-  display.setCursor(0, 16);
+  display.setCursor(0, 14);
   display.print("WiFi: ");
   display.print(AP_SSID);
-  display.setCursor(0, 28);
+  display.setCursor(0, 27);
   display.print("Password: ");
   display.print(AP_PASSWORD);
   display.setCursor(0, 40);
   display.print("IP: ");
-  display.print(WiFi.softAPIP());
-  display.setCursor(0, 56);
+  display.print(AP_IP_STR);
+  // 6x13 ≈13 px высоты; y=56 обрезало низ — держим как нижнюю строку часов (~51)
+  display.setCursor(0, 51);
   display.print("ROM: ");
   display.println(ROM_VERSION);
   display.display();
@@ -642,6 +643,10 @@ void startConfigMode() {
   snprintf(detail, sizeof(detail), "%d MHz", getCpuFrequencyMhz());
   logToDisplay(CODE_CPU_FREQ, detail);
 
+  const IPAddress apIp = AP_IP_ADDR;
+  const IPAddress apGw = AP_IP_ADDR;
+  const IPAddress apMask(255, 255, 255, 0);
+
   bool apStarted = false;
   for (uint8_t attempt = 0; attempt < 3 && !apStarted; ++attempt) {
     WiFi.disconnect(true);
@@ -650,29 +655,32 @@ void startConfigMode() {
     WiFi.mode(WIFI_AP);
     WiFi.setTxPower(WIFI_POWER_15dBm);
     delay(80);
+    // Force classic SoftAP address so OLED / clients always use 192.168.4.1
+    WiFi.softAPConfig(apIp, apGw, apMask);
     apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD);
     if (!apStarted) {
       delay(200);
     }
   }
 
-  IPAddress apIp = WiFi.softAPIP();
-  if (apStarted && apIp == IPAddress((uint32_t)0)) {
+  IPAddress reportedIp = WiFi.softAPIP();
+  if (apStarted && (reportedIp == IPAddress((uint32_t)0) || reportedIp != apIp)) {
     uint32_t waitStart = millis();
     while ((millis() - waitStart) < 1500UL) {
       delay(50);
-      apIp = WiFi.softAPIP();
-      if (apIp != IPAddress((uint32_t)0)) {
+      reportedIp = WiFi.softAPIP();
+      if (reportedIp == apIp) {
         break;
       }
     }
   }
-  snprintf(detail, sizeof(detail), "%s %s", apStarted ? "OK" : "FAIL", apIp.toString().c_str());
+  snprintf(detail, sizeof(detail), "%s %s", apStarted ? "OK" : "FAIL", AP_IP_STR);
   logToDisplay(CODE_CONFIG_AP_START, detail);
-  Serial.printf("AP start: %s, SSID=%s, IP=%s\n",
+  Serial.printf("AP start: %s, SSID=%s, IP=%s (softAPIP=%s)\n",
                 apStarted ? "OK" : "FAIL",
                 AP_SSID,
-                apIp.toString().c_str());
+                AP_IP_STR,
+                reportedIp.toString().c_str());
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);

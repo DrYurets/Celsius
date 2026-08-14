@@ -38,7 +38,10 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.11"
+// SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
+#define AP_IP_ADDR IPAddress(192, 168, 4, 1)
+#define AP_IP_STR "192.168.4.1"
+#define ROM_VERSION "A1.4.13"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -290,6 +293,15 @@ class OledDisplayCompat {
   void ssd1306_command(uint8_t cmd) {
     oled_.ssd1306_command(cmd);
   }
+
+  /** Контраст SSD1306 (0 = минимум, begin() по умолчанию ставит ~0xCF — очень ярко). */
+  void setContrast(uint8_t value) {
+    oled_.ssd1306_command(SSD1306_SETCONTRAST);
+    oled_.ssd1306_command(value);
+  }
+
+  /** Библиотечный dim: contrast 0 / восстановление дефолта begin(). */
+  void dim(bool enable) { oled_.dim(enable); }
 
  private:
   void applyFont() {
@@ -1346,8 +1358,12 @@ void drawDayShort(uint8_t wday, int16_t x, int16_t y) {
 }
 
 void setBrightness(uint8_t br) {
-  display.ssd1306_command(0x81);
-  display.ssd1306_command(br);
+  // Adafruit_SSD1306::begin() для 128×64 + SWITCHCAP выставляет contrast≈0xCF (очень ярко).
+  // 0x00 на многих SSD1306 = полностью невидимый экран; минимум как у Gyver — 0x01.
+  if (br == 0) {
+    br = 0x01;
+  }
+  display.setContrast(br);
 }
 
 static void drawDegreeMark(int16_t x, int16_t y) {
@@ -1542,8 +1558,7 @@ void drawBattery(uint8_t bars) {
   }
 }
 
-static void drawOtaAvailableIcon() {
-  const int16_t x = 88;
+static void drawOtaAvailableIcon(int16_t x) {
   const int16_t y = 1;
   display.drawRect(x, y + 4, 10, 6, SSD1306_WHITE);
   display.fillRect(x + 4, y, 2, 5, SSD1306_WHITE);
@@ -1551,17 +1566,24 @@ static void drawOtaAvailableIcon() {
   display.fillRect(x + 4, y - 1, 1, 1, SSD1306_WHITE);
 }
 
-// Пиктограмма домика для внутренней температуры (~7x7 px)
-static void drawHomeIcon(int16_t x, int16_t y) {
-  display.fillRect(x + 3, y, 1, 1, SSD1306_WHITE);
-  display.fillRect(x + 2, y + 1, 3, 1, SSD1306_WHITE);
-  display.fillRect(x + 1, y + 2, 5, 1, SSD1306_WHITE);
-  display.drawRect(x + 1, y + 3, 5, 4, SSD1306_WHITE);
-}
-
 /*
 * Вывод на экран
 */
+
+static void formatSignedIntCompact(char *out, size_t outSize, float t) {
+  if (isnan(t) || !out || outSize == 0) {
+    if (out && outSize) {
+      snprintf(out, outSize, "--");
+    }
+    return;
+  }
+  int v = (int)lroundf(t);
+  if (v > 0) {
+    snprintf(out, outSize, "+%d", v);
+  } else {
+    snprintf(out, outSize, "%d", v);
+  }
+}
 
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   sanitizeOtaUpdateFlag();
@@ -1569,86 +1591,139 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
 
   const int16_t topY = 0;
-  const int16_t bottomY = 51;  // 6x13 (~13 px) → низ экрана 64
-  // 1) День недели — левый верхний угол
+  const int16_t screenW = (int16_t)display.width();
+  const int16_t batReserve = 22;
+  int16_t rightLimit = (int16_t)(screenW - batReserve);
+
+  // Верх: день недели → дата → indoor T/RH → OTA → батарея (как на 128x128)
+  int16_t x = 0;
   if (settings.showWeekday) {
+    const char *label;
+    if (settings.weekdayLanguageRu) {
+      static const char *ruDays[] = { "ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ" };
+      label = ruDays[wday % 7];
+    } else {
+      static const char *enDays[] = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
+      label = enDays[wday % 7];
+    }
     drawDayShort(wday, 0, topY);
+    x = 4 + display.getTextWidth(label) + 4;
   }
-  // 2) Дата (число.месяц) — по центру верхней строки
   if (settings.showDate) {
     char dateBuf[8];
     snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d", d, mo);
-    display.setTextSize(1);
-    const int16_t textW = display.getTextWidth(dateBuf);
-    const int16_t dateX = ((int16_t)display.width() - textW) / 2;
-    display.setCursor(dateX, topY);
+    display.setCursor(x, topY);
     display.print(dateBuf);
+    x = (int16_t)(x + display.getTextWidth(dateBuf) + 4);
   }
-  // 3) Индикатор заряда — вверху справа (как раньше)
+
   if (otaUpdateAvailable) {
-    drawOtaAvailableIcon();
+    rightLimit = (int16_t)(rightLimit - 14);
+    drawOtaAvailableIcon(rightLimit);
   }
   drawBattery(batBars);
 
-  // Формат времени
+  // Indoor: температура и влажность между датой и OTA/батареей
+  {
+    char tBuf[8];
+    snprintf(tBuf, sizeof(tBuf), "%d", (int)tempC);
+    char hBuf[8];
+    snprintf(hBuf, sizeof(hBuf), "%d%%", (int)hum);
+    const int16_t degW = 4;
+    const int16_t gap = 3;
+    const int16_t needW =
+        (int16_t)(display.getTextWidth(tBuf) + degW + gap + display.getTextWidth(hBuf));
+    if (x + needW <= rightLimit) {
+      display.setCursor(x, topY);
+      display.print(tBuf);
+      const int16_t degX = (int16_t)(x + display.getTextWidth(tBuf) + 1);
+      drawDegreeMark(degX, topY);
+      display.setCursor((int16_t)(degX + degW + gap - 1), topY);
+      display.print(hBuf);
+    }
+  }
+
+  // Крупное время слева; справа — иконка текущей погоды + T + PoP
   int displayH = h;
   if (!settings.timeFormat24h) {
     displayH = h % 12;
     if (displayH == 0) displayH = 12;
   }
 
-  display.setTextSize(4);
+  const bool showWeather = settings.weatherEnabled && !isnan(outdoorTemperature);
+  const int16_t timeY = 16;
+  const int16_t iconY = 14;
+  const int16_t iconSize = 21;  // meteocon scale 1
+  const int16_t iconGap = 3;
+  const int16_t iconX = showWeather ? (int16_t)(screenW - iconSize - 2) : screenW;
+  const int16_t timeAreaW = showWeather ? (int16_t)(iconX - iconGap) : screenW;
 
+  display.setTextSize(4);
   char lBuf[3], rBuf[3];
   snprintf(lBuf, sizeof(lBuf), "%02d", displayH);
   snprintf(rBuf, sizeof(rBuf), "%02d", m);
 
-  const int colonSpace = 14;
+  const int colonSpace = 12;
   const int16_t fullW =
       (int16_t)(display.getTextWidth(lBuf) + display.getTextWidth(rBuf) + colonSpace);
-  const int screenW = (int)display.width();
-  int startX = (screenW - fullW) / 2;
+  // При погоде справа — время максимально влево; без погоды — по центру.
+  int startX = showWeather ? 0 : ((int)timeAreaW - fullW) / 2;
   if (startX < 0) {
     startX = 0;
   }
-  const int y = 16;
 
-  display.setCursor(startX, y);
+  display.setCursor(startX, timeY);
   display.print(lBuf);
 
   const int colonX = startX + display.getTextWidth(lBuf) + (colonSpace - 3) / 2;
-  const int colonYtop = y + 8;
+  const int colonYtop = timeY + 8;
   const int colonYbot = colonYtop + 3 + 8;
   display.fillRect(colonX, colonYtop, 3, 3, SSD1306_WHITE);
   display.fillRect(colonX, colonYbot, 3, 3, SSD1306_WHITE);
 
   const int minX = startX + display.getTextWidth(lBuf) + colonSpace;
-  display.setCursor(minX, y);
+  display.setCursor(minX, timeY);
   display.print(rBuf);
 
-  display.setTextSize(1);
-  // Наружная температура (если доступна)
-  if (!isnan(outdoorTemperature)) {
-    int16_t outX = (outdoorTemperature > 0) ? 12 : 9;
+  if (showWeather) {
+    const bool nightIcon = (h < NIGHT_END_H || h >= NIGHT_START_H);
+    drawWeatherIcon(display, iconX, iconY, 1, weatherWmoCode, weatherWindSpeedMs, nightIcon);
+
+    display.setTextSize(1);
     char outBuf[8];
-    snprintf(outBuf, sizeof(outBuf), "%d", (int)outdoorTemperature);
-    display.setCursor(outX, bottomY);
+    formatSignedIntCompact(outBuf, sizeof(outBuf), outdoorTemperature);
+    int16_t tw = display.getTextWidth(outBuf);
+    const int16_t underIconY = (int16_t)(iconY + iconSize + 1);
+    int16_t tX = (int16_t)(iconX + (iconSize - tw - 4) / 2);
+    if (tX < 0) {
+      tX = iconX;
+    }
+    display.setCursor(tX, underIconY);
     display.print(outBuf);
-    drawDegreeMark((int16_t)(outX + display.getTextWidth(outBuf) + 1), (int16_t)(bottomY - 1));
+    if (!isnan(outdoorTemperature)) {
+      drawDegreeMark((int16_t)(tX + tw + 1), underIconY);
+    }
+
+    char popBuf[8];
+    bool showPop = false;
+    if (!isnan(weatherPrecipProbabilityPct)) {
+      const int popPct = (int)lroundf(weatherPrecipProbabilityPct);
+      if (popPct > 0) {
+        snprintf(popBuf, sizeof(popBuf), "%d%%", popPct);
+        showPop = true;
+      }
+    }
+    if (showPop) {
+      tw = display.getTextWidth(popBuf);
+      tX = (int16_t)(iconX + (iconSize - tw) / 2);
+      display.setCursor(tX, (int16_t)(underIconY + 12));
+      display.print(popBuf);
+    }
   }
-  // Внутренняя температура + влажность
-  const int16_t homeX = 41;
-  drawHomeIcon(homeX, bottomY);
-  const int16_t inX = 52;
-  display.setCursor(inX, bottomY);
-  char inBuf[8];
-  snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
-  display.print(inBuf);
-  drawDegreeMark((int16_t)(inX + display.getTextWidth(inBuf) + 1), (int16_t)(bottomY - 1));
-  display.setCursor(78, bottomY);
-  display.printf("%d%%", (int)hum);
+
   display.display();
   displayBackupValid = false;
 }

@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.11",
+  "version": "A1.4.13",
   "releaseDate": "2026-08-14",
-  "whatsNew": "OLED: Adafruit SSD1306 + U8g2 (кириллица/logisoso) вместо GyverOLED; AutoOTA только при числово более новой версии.",
-  "notes": "A1.4.11: Adafruit_SSD1306 + U8g2_for_Adafruit_GFX fonts; A1.4.10 OTA version compare included.",
+  "whatsNew": "Главный экран как 128x128: верх weekday/дата/indoor/OTA/батарея; время слева, погода справа; без нижней outdoor-строки.",
+  "notes": "A1.4.13: drawClock layout port from 128x128 (top bar + weather rail); contrast min 0x01.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",
