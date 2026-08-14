@@ -23,14 +23,14 @@
 5. **Debug codes**: функции логирования на OLED (`logToDisplay`) завязаны на флаги показа дебага. Не нужно безусловно “засорять” OLED — используйте `settings.showDebugCodes` и существующие коды.
 
 ## Версия прошивки (`ROM_VERSION`)
-- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.10`).
-- Значение выводится на OLED в **режиме настройки** (SoftAP): строка вида `v: <ROM_VERSION>` в `updateConfigModeDisplay()`.
-- Для AutoOTA версия также задаётся в `project.json` (`version`); после OTA/сборки бинарник обычно лежит в `build/esp32.esp32.esp32c3/Celsius.ino.bin`.
+- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.13`).
+- Значение выводится на OLED в **режиме настройки** (SoftAP): строка `ROM: <ROM_VERSION>` в `updateConfigModeDisplay()`.
+- Для AutoOTA версия также задаётся в `project.json` (`version`, `releaseDate`, `whatsNew`/`notes`); после OTA/сборки бинарник обычно лежит в `build/esp32.esp32.esp32c3/Celsius.ino.bin`.
 - Агент **не меняет** `ROM_VERSION` про себя; см. пункт 3 в блоке **IMPORTANT** выше.
 
 ## Важные файлы
 1. `Celsius.ino`
-   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO0 / LED); `ROM_VERSION`; `OledDisplayCompat` / `drawClock`.
+   - основная логика: WiFi/NTP, epoch/дрейф, погода в цикле, OLED, EEPROM, deep sleep; кнопки погоды (GPIO4) и OTA-info (GPIO0 / LED); `ROM_VERSION`, `AP_IP_*`; `OledDisplayCompat` / `drawClock`; `otaButtonSampleLow()`.
 2. `WeatherAPI.h`
    - HTTP GET к Open-Meteo (`current+hourly+daily`), парсинг JSON, RTC-данные погоды; `shouldUpdateNetwork` / `lastNetworkUpdate`; кеш `weatherHourly*` для главного экрана.
 3. `WeatherDetailScreens.h`
@@ -38,8 +38,10 @@
 4. `Meteocons.h`
    - глифы погоды по WMO `weather_code` (`meteoconByWmo` / `meteoconByWmoAndWind`).
 5. `WebConfigServer.h`
-   - web-админка, сохранение настроек, OTA upload, экспорт/импорт JSON.
-6. `project.json`
+   - web-админка, сохранение настроек, OTA upload, экспорт/импорт JSON; `startConfigMode()` / `updateConfigModeDisplay()`.
+6. `SyncProgress.h`
+   - OLED-экран шагов сетевого цикла (WiFi → NTP → OTA → погода), если включён `showSyncProgress`.
+7. `project.json`
    - манифест AutoOTA (`version`, `whatsNew`/`notes`, URL к `.bin`).
 
 ## Поддерживаемые варианты экрана (ветки)
@@ -88,9 +90,11 @@
 ## Web-админка (конфигурация)
 ### Setup mode
 - Нет WiFi-учёток или первичная NTP/WiFi не удалась → SoftAP:
-  - SSID `AP_SSID` (CelsiusClock), password `AP_PASSWORD`, порт 80.
-- На OLED в AP: строка `v: <ROM_VERSION>`.
-- Старт AP: `disconnect` → `WIFI_OFF` → `WIFI_AP`, до 3 попыток `softAP`.
+  - SSID `AP_SSID` (`CelsiusClock`), password `AP_PASSWORD`, порт 80.
+  - Адрес AP **фиксирован**: `AP_IP_ADDR` / `AP_IP_STR` = **`192.168.4.1`** (константы в `Celsius.ino`); в `startConfigMode()` вызывается `WiFi.softAPConfig(192.168.4.1, …)` **до** `softAP`, чтобы клиенты и OLED всегда видели один и тот же IP (не полагаться на `WiFi.softAPIP()` до готовности стека).
+  - Web-админка: **`http://192.168.4.1`**
+- На OLED в AP (`updateConfigModeDisplay()`): WiFi SSID, password, **`IP: 192.168.4.1`**, **`ROM: <ROM_VERSION>`**, строка `OLED: SH1107 128x128`.
+- Старт AP: `disconnect` → `WIFI_OFF` → `WIFI_AP` → `softAPConfig` → до 3 попыток `softAP`.
 
 ### EEPROM и сохранение настроек
 - Структура `DeviceSettings` (фрагмент актуальных полей):
@@ -139,7 +143,7 @@
   - на экране OTA удержание ~2 с — установка;
   - **удержание ~5 с после главного экрана** — сброс WiFi (`clearWiFiConfig`) и reboot в SoftAP;
   - при **загрузке** (не deep sleep / не `ESP.restart`): удержание ~2 с — тот же сброс.
-  В активной фазе после отрисовки часов: idle-окно **~0.4 с** (или ~2.5 с, если есть OTA); опрос GPIO0 **импульсами** (PULLUP → read → OUTPUT LOW), чтобы LED не светился вполнакала. При удержании — continuous INPUT для UI сброса/OTA. Из deep sleep GPIO0 **не** будит.
+  В активной фазе после отрисовки часов: idle-окно **~0.4 с** (или ~2.5 с, если есть OTA); опрос GPIO0 **импульсами** через `otaButtonSampleLow()` (PULLUP → read → OUTPUT LOW), чтобы LED не светился вполнакала. При удержании — continuous INPUT для UI сброса/OTA. Из deep sleep GPIO0 **не** будит.
 - В простое / deep sleep GPIO0 = **OUTPUT LOW** (LED выключен).
 - Сброс WiFi по GPIO0 при boot: не после `ESP.restart()` и не после deep sleep (иначе ложный SoftAP из‑за LED на том же пине); при cold/USB/EXT — удержание ~2 с.
 - Экран OTA **не** перехватывает GPIO4: погода по-прежнему на кнопке погоды.
@@ -151,7 +155,7 @@
 ### OTA (web + AutoOTA)
 - Web OTA: `/ota` в setup mode; проверки OTA-partition, батареи, пароля AP; заливается application `.bin`.
 - AutoOTA: манифест `project.json`; индикатор на главном экране; ручное подтверждение через GPIO0.
-- Важно: библиотека AutoOTA считает update любую `version !=` текущей. В прошивке принимаем только **числово более новую** (`isRemoteFirmwareNewer`, напр. A1.4.10 > A1.4.9); иначе иконка/установка сбрасываются.
+- Важно: библиотека AutoOTA считает update любую `version !=` текущей. В прошивке принимаем только **числово более новую** (`isRemoteFirmwareNewer` / `compareFirmwareVersions`, напр. A1.4.13 > A1.4.12); иначе иконка/установка сбрасываются.
 
 ### Ограничение сетевого цикла
 В `runCycle()` WiFi для NTP/погоды/AutoOTA только если:
@@ -173,13 +177,13 @@
 ### Рисование (`drawClock`)
 - Adafruit_SH1107 + `U8g2_for_Adafruit_GFX` через `OledDisplayCompat` (UTF-8/кириллица; курсор снаружи — top-left).
 - Верхняя строка: weekday → дата → indoor T/RH → иконка OTA → батарея (без иконки домика).
-- Строка времени: HH:MM на `y≈22`; иконка текущей погоды справа на `y≈16`; под иконкой outdoor T и PoP.
-- Ниже: 3 колонки hourly (`час+1..+3`): **час → иконка → T → PoP**.
-- Ориентация BMI160 — `setRotation(0/2)`.
+- Строка времени: HH:MM на `y≈22`; иконка текущей погоды справа на `y≈16`; под иконкой outdoor T и PoP (**PoP не рисуется при 0%**).
+- Ниже: 3 колонки hourly (`час+1..+3`): **час → иконка → T → PoP**; после числа часа — **две метки °** (визуально `HH°°` ≈ прогноз на `HH:00`); **PoP в колонке скрывается при 0%**.
+- Ориентация BMI160 — `setRotation(0/2)`; читается непосредственно перед `drawClock()` (возможен повторный кадр при смене ориентации).
 - Детальная погода — кадры под 128×128 (`WeatherDetailScreens.h`).
 
 ### Батарея
-- Иконка «телефонного» типа у правого верхнего края.
+- Иконка «телефонного» типа у правого верхнего края; **скруглённый контур** (`drawRoundRect`), заливка по той же геометрии (без «дыр» в углах).
 
 ## Последовательность работы на устройстве
 ### setup()
@@ -201,3 +205,18 @@
 4. OLED-дебаг только через `showDebugCodes` / `logToDisplay`.
 5. После правок: компиляция в Arduino IDE с **достаточной** partition scheme; проверить sleep и координаты.
 6. Падения: `Guru Meditation` / access fault — через Exception Decoder/addr2line.
+
+### OLED-симулятор (`oled_simulator/`, локально, в `.gitignore`)
+Бrowser-симулятор главного экрана и кнопок **без ESP32** — для отладки UI на Ubuntu/PC.
+
+```bash
+cd oled_simulator
+python3 host/server.py
+# → http://127.0.0.1:8765/
+```
+
+- **`host/clock_source.py`** — порт `drawClock()` (те же координаты, mock сенсоры/погода, глифы из `Meteocons.h`).
+- **`host/network_sync.py`** — NTP + Open-Meteo; sync при старте и на границе часа (интервал `--weather-update-hours`, по умолчанию 1).
+- WebSocket + canvas 128×128; виртуальные GPIO0 (OTA/LED) и GPIO4 (погода/детали).
+- Подробности: `oled_simulator/README.md`, протокол — `oled_simulator/PROTOCOL.md`.
+- При правках `drawClock` / главного UI имеет смысл сверять кадр в симуляторе.

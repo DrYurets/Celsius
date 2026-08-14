@@ -41,6 +41,9 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
+// SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
+#define AP_IP_ADDR IPAddress(192, 168, 4, 1)
+#define AP_IP_STR "192.168.4.1"
 #define ROM_VERSION "A1.4.13"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
