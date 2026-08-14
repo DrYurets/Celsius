@@ -171,7 +171,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.setTextSize(2);
       display.setCursor(0, 12);
       display.print(tBuf);
-      int16_t xAfterT = (int16_t)strlen(tBuf) * 12;
+      int16_t xAfterT = display.getTextWidth(tBuf);
       drawDegreeMark(display, xAfterT + 1, 14);
       display.setCursor(xAfterT + 7, 12);
       display.print("С");
@@ -184,7 +184,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.setTextSize(2);
       display.setCursor(0, 44);
       display.print(fBuf);
-      int16_t xAfterF = (int16_t)strlen(fBuf) * 12;
+      int16_t xAfterF = display.getTextWidth(fBuf);
       drawDegreeMark(display, xAfterF + 1, 46);
       display.setCursor(xAfterF + 7, 44);
       display.print("С");
@@ -226,8 +226,10 @@ inline void drawWeatherDetailScreen(DisplayT &display,
           display.print(degBuf);
         }
         if (!isnan(windDirDeg)) {
-          const int16_t chW = 12;  // как у остальных крупных цифр на экране (setTextSize(2))
-          int16_t xAfter = (int16_t)utf8GlyphCount(dirLabel) * chW + chW + (int16_t)strlen(degBuf) * chW;
+          char combo[32];
+          snprintf(combo, sizeof(combo), "%s %s", dirLabel, degBuf);
+          display.setTextSize(2);
+          const int16_t xAfter = display.getTextWidth(combo);
           drawDegreeMark(display, xAfter + 1, kWindDirTextY + 2);
         }
       }
@@ -318,7 +320,8 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         char nBuf[12];
         formatSignedIntTemp(nBuf, sizeof(nBuf), nightMin);
         display.print(nBuf);
-        int16_t xAfter = 42 + (int16_t)strlen(nBuf) * 6;
+        display.setTextSize(1);
+        const int16_t xAfter = (int16_t)(42 + display.getTextWidth(nBuf));
         drawDegreeMark(display, xAfter + 1, 48);
         display.setCursor(xAfter + 7, 48);
         display.print("С");

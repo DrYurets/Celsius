@@ -42,14 +42,20 @@
 
 ## Поддерживаемые варианты экрана (ветки)
 - `main` — дисплей **128×32** (портретная ориентация).
-- `128x64` — дисплей **128×64** в **альбомной ориентации** (landscape). Разметка адаптирована под 128×64.
+- `128x64` — дисплей **SSD1306 128×64**, драйвер **Adafruit_SSD1306** + **Adafruit_GFX** + **U8g2_for_Adafruit_GFX** (кириллица/logisoso), обёртка `OledDisplayCompat`. Landscape `setRotation(0/2)`. I2C: SDA=8, SCL=9, адрес `0x3C`.
 
 При разработке нового функционала важно учитывать координаты/ориентацию/размеры под конкретную ветку. Сначала выбери правильную ветку.
 
 ### Сборка / partition scheme (важно)
-Ветка `128x64` с OTA и веб-админкой часто **не влезает** в схему **Default 4MB with spiffs (1.2MB APP)** (`Maximum is 1310720`). Для ESP32-C3 4MB выбирайте, например:
+Ветка `128x64` с OTA, веб-админкой и U8g2-шрифтами **не влезает** в схему **Default 4MB with spiffs (1.2MB APP)** (`Maximum is 1310720`). Для ESP32-C3 4MB выбирайте:
 - **Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)** — лимит ~1 966 080 байт, OTA сохраняется.
 После смены схемы нужна **полная прошивка по USB** (желательно с Erase Flash), не только OTA.
+
+### Checklist прошивки ветки `128x64` (SSD1306 / Adafruit + U8g2)
+1. В Arduino IDE: **Adafruit SSD1306**, **Adafruit GFX**, **Adafruit BusIO**, **U8g2_for_Adafruit_GFX** (полный U8g2 для текста не нужен; GyverOLED больше не используется).
+2. Board: ESP32C3; Partition Scheme: **Minimal SPIFFS (1.9MB APP with OTA)**.
+3. Драйвер: `Adafruit_SSD1306(128, 64, &Wire, -1)` + шрифты `6x13`/`10x20` cyrillic, крупные цифры `logisoso28_tn` (size 4).
+4. Проверить: init, главный экран, RU-подписи погоды, flip BMI160, deep sleep/wake, OTA.
 
 ## Архитектура времени
 ### NTP sync
@@ -133,13 +139,13 @@
 - Serial в `WeatherAPI.h` (URL, HTTP, JSON).
 - OLED — только при `settings.showDebugCodes` через `logToDisplay`.
 
-## Отображение на OLED (`128x64`)
+## Отображение на OLED (`128x64` / SSD1306)
 ### Рисование (`drawClock`)
-- GyverOLED + `OledDisplayCompat`.
+- Adafruit_SSD1306 + `U8g2_for_Adafruit_GFX` через `OledDisplayCompat` (UTF-8/кириллица; курсор снаружи — top-left).
 - Верх: weekday / дата / иконка OTA (если есть) / батарея.
-- Крупное время `HH`/`MM` с разделителем из двух `fillRect`.
-- Низ: outdoor temp (если есть) | **пиктограмма домика** + indoor `tempC` | влажность `%`.
-- Ориентация BMI160 — перед отрисовкой (и повтор после draw при смене).
+- Крупное время `HH`/`MM` (`logisoso28`) с разделителем из двух `fillRect`; ширина через `getTextWidth`.
+- Низ (`y≈51`): outdoor temp (если есть) | **пиктограмма домика** + indoor `tempC` | влажность `%`.
+- Ориентация BMI160 — `setRotation(0/2)` перед отрисовкой (и повтор после draw при смене).
 - Детальная погода — отдельные полноэкранные кадры (`WeatherDetailScreens.h`).
 
 ### Батарея

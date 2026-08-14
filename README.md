@@ -148,13 +148,19 @@ Root file `settings.json` contains baseline defaults for provisioning and mass s
 
 Required Arduino libraries:
 
-- GyverOLED
+- Adafruit GFX
+- Adafruit SSD1306
+- Adafruit BusIO
+- U8g2_for_Adafruit_GFX
 - NTPClient
 - ArduinoJson
+- AutoOTA
 - Adafruit SHT31 (if SHT31 is selected)
 - Adafruit AHTX0 (if AHT20/AHT21 is selected)
 - Adafruit BMP280 (if AHT20+BMP280 is selected)
 - Adafruit HTU21DF (if HTU21 is selected)
+
+Partition scheme (ESP32-C3 4MB): **Minimal SPIFFS (1.9MB APP with OTA)** — Default 1.2MB APP is usually too small.
 
 Built-in core libs:
 

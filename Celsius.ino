@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstring>
-#include <GyverOLED.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <U8g2_for_Adafruit_GFX.h>
 #include <Adafruit_SHT31.h>
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_BMP280.h>
@@ -36,7 +38,7 @@
 
 #define AP_SSID "CelsiusClock"
 #define AP_PASSWORD "12345678"
-#define ROM_VERSION "A1.4.10"
+#define ROM_VERSION "A1.4.11"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -44,14 +46,12 @@
 #define I2C_SDA 8
 #define I2C_SCL 9
 #define OLED_ADDR 0x3C
-#define SSD1306_WHITE 1
-#define SSD1306_SWITCHCAPVCC 0
 #define SHT31_ADDR 0x44
 #define AHT20_ADDR 0x38
 #define BMP280_ADDR 0x76
 #define BMP280_ADDR_ALT 0x77
-#define SCREEN_WIDTH 128   // физическое разрешение OLED (SSD1306 128×64)
-#define SCREEN_HEIGHT 64   // в drawClock используется setRotation(1) → логически 64×128
+#define SCREEN_WIDTH 128   // SSD1306 128×64 (landscape, rotation 0/2)
+#define SCREEN_HEIGHT 64
 #define LED_PIN 0
 #define SETUP_BUTTON_PIN 1
 #define WEATHER_BUTTON_PIN 4
@@ -142,41 +142,109 @@
 
 class OledDisplayCompat {
  public:
-  OledDisplayCompat() : oled_(OLED_ADDR) {}
+  // SSD1306 128×64: Adafruit_SSD1306 (буфер/графика) + U8g2_for_Adafruit_GFX (шрифты как на 128x128).
+  OledDisplayCompat()
+      : oled_(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1) {}
 
-  bool begin(int, int) {
-    oled_.init();
+  bool begin(uint8_t vccMode, uint8_t addr) {
+    // Wire уже инициализирован в setup() — не вызывать Wire.begin повторно.
+    if (!oled_.begin(vccMode, addr, false, false)) {
+      return false;
+    }
+    oled_.clearDisplay();
+    u8g_.begin(oled_);
+    u8g_.setFontMode(1);  // transparent
+    u8g_.setFontDirection(0);
+    u8g_.setForegroundColor(SSD1306_WHITE);
+    u8g_.setBackgroundColor(SSD1306_BLACK);
+    setTextSize(1);
+    oled_.display();
     return true;
   }
-  void clearDisplay() { oled_.clear(); }
-  void display() { oled_.update(); }
-  void setTextSize(uint8_t size) { oled_.setScale(constrain((int)size, 1, 4)); }
-  void setTextColor(uint16_t) {}
-  void setRotation(uint8_t) {}
-  /** 180°: одновременный flip по H и V (GyverOLED / SSD1306). */
-  void setUpsideDown(bool upsideDown) {
-    oled_.flipH(upsideDown);
-    oled_.flipV(upsideDown);
-  }
-  void setCursor(int16_t x, int16_t y) { oled_.setCursorXY(x, y); }
-  int16_t width() const { return SCREEN_WIDTH; }
 
-  size_t print(const char *s) { return oled_.print(s); }
-  size_t print(const String &s) { return oled_.print(s); }
-  size_t print(char c) { return oled_.print(c); }
-  size_t print(int v) { return oled_.print(v); }
-  size_t print(unsigned int v) { return oled_.print(v); }
-  size_t print(long v) { return oled_.print(v); }
-  size_t print(unsigned long v) { return oled_.print(v); }
-  size_t print(float v) { return oled_.print(v); }
-  size_t println(const char *s) { return oled_.println(s); }
-  size_t println(const String &s) { return oled_.println(s); }
-  size_t println(int v) { return oled_.println(v); }
-  size_t println(unsigned int v) { return oled_.println(v); }
+  void clearDisplay() { oled_.clearDisplay(); }
+  void display() { oled_.display(); }
+
+  void setTextSize(uint8_t size) {
+    textSize_ = (uint8_t)constrain((int)size, 1, 4);
+    applyFont();
+  }
+  void setTextColor(uint16_t) {
+    u8g_.setForegroundColor(SSD1306_WHITE);
+  }
+  void setRotation(uint8_t r) { oled_.setRotation(r); }
+
+  /** 180° через Adafruit_GFX setRotation(2). */
+  void setUpsideDown(bool upsideDown) { oled_.setRotation(upsideDown ? 2 : 0); }
+
+  /** Курсор в координатах «верхний левый» (как у Adafruit/Gyver). */
+  void setCursor(int16_t x, int16_t y) {
+    cursorX_ = x;
+    cursorY_ = y;
+    syncU8gCursor();
+  }
+
+  int16_t width() const { return (int16_t)oled_.width(); }
+  int16_t height() const { return (int16_t)oled_.height(); }
+
+  int16_t getTextWidth(const char *s) {
+    applyFont();
+    return u8g_.getUTF8Width(s ? s : "");
+  }
+
+  size_t print(const char *s) { return drawText(s, false); }
+  size_t print(const String &s) { return drawText(s.c_str(), false); }
+  size_t print(char c) {
+    char buf[2] = {c, '\0'};
+    return drawText(buf, false);
+  }
+  size_t print(int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", v);
+    return drawText(buf, false);
+  }
+  size_t print(unsigned int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", v);
+    return drawText(buf, false);
+  }
+  size_t print(long v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%ld", v);
+    return drawText(buf, false);
+  }
+  size_t print(unsigned long v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%lu", v);
+    return drawText(buf, false);
+  }
+  size_t print(float v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%g", (double)v);
+    return drawText(buf, false);
+  }
+  size_t println(const char *s) { return drawText(s, true); }
+  size_t println(const String &s) { return drawText(s.c_str(), true); }
+  size_t println(int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", v);
+    return drawText(buf, true);
+  }
+  size_t println(unsigned int v) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", v);
+    return drawText(buf, true);
+  }
   template <typename T>
-  size_t print(const T &v) { return oled_.print(v); }
+  size_t print(const T &v) {
+    String s(v);
+    return drawText(s.c_str(), false);
+  }
   template <typename T>
-  size_t println(const T &v) { return oled_.println(v); }
+  size_t println(const T &v) {
+    String s(v);
+    return drawText(s.c_str(), true);
+  }
 
   int printf(const char *fmt, ...) {
     char buf[64];
@@ -184,34 +252,95 @@ class OledDisplayCompat {
     va_start(args, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    oled_.print(buf);
+    drawText(buf, false);
     return n;
   }
 
   void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
-    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_STROKE);
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawRect(x, y, w, h, SSD1306_WHITE);
   }
-  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t) {
-    oled_.rect(x, y, x + w - 1, y + h - 1, OLED_FILL);
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.fillRect(x, y, w, h, color ? SSD1306_WHITE : SSD1306_BLACK);
+  }
+  void drawRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint16_t color) {
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawRoundRect(x, y, w, h, r, color ? SSD1306_WHITE : SSD1306_BLACK);
+  }
+  void fillRoundRect(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r, uint16_t color) {
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.fillRoundRect(x, y, w, h, r, color ? SSD1306_WHITE : SSD1306_BLACK);
   }
   void drawBitmap(int16_t x, int16_t y, const uint8_t *bmp, int16_t w, int16_t h, uint16_t) {
-    oled_.drawBitmap(x, y, bmp, w, h, BITMAP_NORMAL, BUF_ADD);
+    if (!bmp || w <= 0 || h <= 0) {
+      return;
+    }
+    oled_.drawBitmap(x, y, bmp, w, h, SSD1306_WHITE);
   }
 
   void ssd1306_command(uint8_t cmd) {
-    if (waitContrast_) {
-      oled_.setContrast(cmd);
-      waitContrast_ = false;
-      return;
-    }
-    if (cmd == 0x81) waitContrast_ = true;
-    else if (cmd == 0xAF) oled_.setPower(true);
-    else if (cmd == 0xAE) oled_.setPower(false);
+    oled_.ssd1306_command(cmd);
   }
 
  private:
-  GyverOLED<SSD1306_128x64, OLED_BUFFER> oled_;
-  bool waitContrast_ = false;
+  void applyFont() {
+    switch (textSize_) {
+      case 1:
+        u8g_.setFont(u8g2_font_6x13_t_cyrillic);
+        break;
+      case 2:
+        u8g_.setFont(u8g2_font_10x20_t_cyrillic);
+        break;
+      case 3:
+        u8g_.setFont(u8g2_font_logisoso22_tn);
+        break;
+      default:
+        // На 64 px высоты logisoso28 лучше, чем 32: время + нижняя строка без клипа.
+        u8g_.setFont(u8g2_font_logisoso28_tn);
+        break;
+    }
+  }
+
+  void syncU8gCursor() {
+    applyFont();
+    // U8g2: Y = baseline; снаружи держим top-left как у Adafruit.
+    u8g_.setCursor(cursorX_, (int16_t)(cursorY_ + u8g_.getFontAscent()));
+  }
+
+  int16_t lineHeight() {
+    applyFont();
+    return (int16_t)(u8g_.getFontAscent() - u8g_.getFontDescent() + 1);
+  }
+
+  size_t drawText(const char *s, bool newline) {
+    if (!s) {
+      s = "";
+    }
+    syncU8gCursor();
+    size_t n = u8g_.print(s);
+    cursorX_ = u8g_.getCursorX();
+    if (newline) {
+      cursorX_ = 0;
+      cursorY_ = (int16_t)(cursorY_ + lineHeight());
+      syncU8gCursor();
+    }
+    return n;
+  }
+
+  Adafruit_SSD1306 oled_;
+  U8G2_FOR_ADAFRUIT_GFX u8g_;
+  int16_t cursorX_ = 0;
+  int16_t cursorY_ = 0;
+  uint8_t textSize_ = 1;
 };
 
 OledDisplayCompat display;
@@ -468,7 +597,7 @@ static void showOtaUpdateInfoScreen() {
   const size_t msgLen = strnlen(msg, sizeof(otaAvailableMessage) - 1);
 
   // UTF-8 safe wrap: режем по числу глифов, а не по байтам.
-  constexpr uint8_t kGlyphsPerLine = 21;  // 21*6px = 126px, почти вся ширина 128px
+  constexpr uint8_t kGlyphsPerLine = 20;  // ~6 px/glyph у u8g2 6x13
   constexpr uint8_t kMaxWrappedLines = 32;
   char wrapped[kMaxWrappedLines][48];
   uint8_t wrappedCount = 0;
@@ -513,10 +642,10 @@ static void showOtaUpdateInfoScreen() {
     }
   }
 
-  const uint8_t firstPageLines = 3;
-  const uint8_t nextPageLines = 5;  // плотность ниже, чтобы строки на 2+ страницах не налезали
-  const int16_t firstPageLineStep = 10;
-  const int16_t nextPageLineStep = 12;
+  const uint8_t firstPageLines = 2;
+  const uint8_t nextPageLines = 4;
+  const int16_t firstPageLineStep = 13;
+  const int16_t nextPageLineStep = 14;
   uint8_t totalPages = 1;
   if (wrappedCount > firstPageLines) {
     uint8_t rem = (uint8_t)(wrappedCount - firstPageLines);
@@ -831,7 +960,7 @@ void logToDisplay(const char *code, const char *detail, uint16_t holdMs) {
   }
   setDisplayState(true);
   setBrightness(0x01);
-  display.setRotation(0);  // Горизонтальная ориентация для дебаг-кодов
+  applyDisplayOrientation();
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -845,7 +974,6 @@ void logToDisplay(const char *code, const char *detail, uint16_t holdMs) {
   if (holdMs > 0) {
     delay(holdMs);
   }
-  display.setRotation(1);  // Возвращаем вертикальную ориентацию
 }
 
 
@@ -1443,16 +1571,17 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.setTextSize(1);
 
   const int16_t topY = 0;
+  const int16_t bottomY = 51;  // 6x13 (~13 px) → низ экрана 64
   // 1) День недели — левый верхний угол
   if (settings.showWeekday) {
     drawDayShort(wday, 0, topY);
   }
-  // 2) Дата (число.месяц) — по центру верхней строки (шрифт 1: ~6 px на символ)
+  // 2) Дата (число.месяц) — по центру верхней строки
   if (settings.showDate) {
     char dateBuf[8];
     snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d", d, mo);
-    const int16_t charW = 6;
-    const int16_t textW = charW * (int16_t)strlen(dateBuf);
+    display.setTextSize(1);
+    const int16_t textW = display.getTextWidth(dateBuf);
     const int16_t dateX = ((int16_t)display.width() - textW) / 2;
     display.setCursor(dateX, topY);
     display.print(dateBuf);
@@ -1463,8 +1592,6 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   }
   drawBattery(batBars);
 
-  //display.drawLine(0, 20, 128, 20, SSD1306_WHITE); // разделительная линия
-
   // Формат времени
   int displayH = h;
   if (!settings.timeFormat24h) {
@@ -1474,67 +1601,54 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
 
   display.setTextSize(4);
 
-  // Подготовим строку времени для расчета ширины
   char lBuf[3], rBuf[3];
   snprintf(lBuf, sizeof(lBuf), "%02d", displayH);
   snprintf(rBuf, sizeof(rBuf), "%02d", m);
 
-  // Ширина символа шрифта размером 4: 6*4=24px
-  int charW = 6 * 4; // 24 px
-  int colonSpace = 16; // место между часами и минутами, чтобы хватило для квадратиков
-  int lLen = strlen(lBuf);
-  int rLen = strlen(rBuf);
-  int fullW = (lLen + rLen) * charW + colonSpace;
-
-  int screenW = (int)display.width();
+  const int colonSpace = 14;
+  const int16_t fullW =
+      (int16_t)(display.getTextWidth(lBuf) + display.getTextWidth(rBuf) + colonSpace);
+  const int screenW = (int)display.width();
   int startX = (screenW - fullW) / 2;
-  int y = 20;
+  if (startX < 0) {
+    startX = 0;
+  }
+  const int y = 16;
 
-  // Нарисовать часы
   display.setCursor(startX, y);
   display.print(lBuf);
 
-  // Нарисовать "двоеточие" из двух квадратов 3x3px с разносом 8px
-  int colonX = startX + lLen * charW + (colonSpace - 3) / 2;
-  int colonYtop = y + 6;          // немного ниже верхнего края цифр
-  int colonYbot = colonYtop + 3 + 8; // нижний квадрат с промежутком 8px
-
+  const int colonX = startX + display.getTextWidth(lBuf) + (colonSpace - 3) / 2;
+  const int colonYtop = y + 8;
+  const int colonYbot = colonYtop + 3 + 8;
   display.fillRect(colonX, colonYtop, 3, 3, SSD1306_WHITE);
   display.fillRect(colonX, colonYbot, 3, 3, SSD1306_WHITE);
 
-  // Нарисовать минуты
-  int minX = startX + lLen * charW + colonSpace;
+  const int minX = startX + display.getTextWidth(lBuf) + colonSpace;
   display.setCursor(minX, y);
   display.print(rBuf);
-
-  //display.drawLine(0, 48, 128, 48, SSD1306_WHITE);
 
   display.setTextSize(1);
   // Наружная температура (если доступна)
   if (!isnan(outdoorTemperature)) {
-    int16_t outX = 12;
-    if (outdoorTemperature > 0) {
-      outX = 12;
-    } else {
-      outX = 9;  // оставляем место для минуса
-    }
+    int16_t outX = (outdoorTemperature > 0) ? 12 : 9;
     char outBuf[8];
     snprintf(outBuf, sizeof(outBuf), "%d", (int)outdoorTemperature);
-    display.setCursor(outX, 56);
+    display.setCursor(outX, bottomY);
     display.print(outBuf);
-    drawDegreeMark(outX + (int16_t)strlen(outBuf) * 6 + 1, 55);
+    drawDegreeMark((int16_t)(outX + display.getTextWidth(outBuf) + 1), (int16_t)(bottomY - 1));
   }
   // Внутренняя температура + влажность
   const int16_t homeX = 41;
-  drawHomeIcon(homeX, 56);
+  drawHomeIcon(homeX, bottomY);
   const int16_t inX = 52;
-  display.setCursor(inX, 56);
+  display.setCursor(inX, bottomY);
   char inBuf[8];
   snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
   display.print(inBuf);
-  drawDegreeMark(inX + (int16_t)strlen(inBuf) * 6 + 1, 55);
-  display.setCursor(78, 56);
-  display.printf("%d%%", (int)hum);  // влажность
+  drawDegreeMark((int16_t)(inX + display.getTextWidth(inBuf) + 1), (int16_t)(bottomY - 1));
+  display.setCursor(78, bottomY);
+  display.printf("%d%%", (int)hum);
   display.display();
   displayBackupValid = false;
 }
