@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.9",
-  "releaseDate": "2026-07-14",
-  "whatsNew": "Общий интервал NTP+погоды в часах (админка). Пиктограмма домика у внутренней температуры. Документация AGENTS актуализирована.",
-  "notes": "A1.4.9: единый сетевой цикл по weatherUpdateHours; иконка дома на главном экране.",
+  "version": "A1.4.10",
+  "releaseDate": "2026-08-14",
+  "whatsNew": "AutoOTA: иконка обновления только если remote-версия числово новее текущей; GPIO4 снова открывает погоду, а не ложный changelog.",
+  "notes": "A1.4.10: numeric isRemoteFirmwareNewer + sanitizeOtaUpdateFlag (from 128x128).",
   "builds": [
     {
       "chipFamily": "ESP32-C3",
