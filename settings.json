@@ -12,7 +12,8 @@
     "hourlyBlink": true,
     "weekdayLanguageRu": true,
     "uiLanguage": "ru",
-    "showSyncProgress": false
+    "showSyncProgress": false,
+    "hourlyBuzzer": false
   },
   "nightMode": {
     "startH": 23,

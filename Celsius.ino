@@ -1,8 +1,8 @@
 /*
 * Celsius Clock
-* ROM version: A1.4.13
+* ROM version: A1.4.14
 * https://github.com/DrYurets/Celsius/tree/128x128
-* Date: 05.08.2026
+* Date: 18.08.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -44,7 +44,7 @@
 // SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
 #define AP_IP_ADDR IPAddress(192, 168, 4, 1)
 #define AP_IP_STR "192.168.4.1"
-#define ROM_VERSION "A1.4.13"
+#define ROM_VERSION "A1.4.14"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -67,6 +67,8 @@
 #define OTA_BUTTON_PIN LED_PIN  // GPIO0: LED + кнопка сброса (boot) + OTA-info
 #define BMI160_INT1_PIN 5
 #define BAT_PIN 3          // GPIO 3
+#define BUZZER_PIN 20      // активный зуммер (второй контакт → GND)
+#define BUZZER_BEEP_MS 50UL
 #define SLEEP_US 950000UL  // 0,95 с
 
 #define NIGHT_START_H 23
@@ -442,6 +444,7 @@ struct DeviceSettings {
   uint16_t autoOtaCheckHours;    // период проверки AutoOTA в часах
   uint8_t activeWeekdaysMask;    // биты 0..6 = ПН..ВС: 1=часы работают в этот день
   bool showSyncProgress;         // OLED: экран шагов NTP/погоды вместо главных часов (по умолч. выкл.)
+  bool hourlyBuzzer;             // короткий бип зуммера на смене часа (по умолч. выкл.)
 };
 
 static_assert(EEPROM_SIZE >= (EEPROM_SETTINGS_ADDR + sizeof(DeviceSettings)),
@@ -474,7 +477,8 @@ static DeviceSettings settings = {
   .autoOtaEnabled = true,
   .autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT,
   .activeWeekdaysMask = WEEKDAY_MASK_ALL,
-  .showSyncProgress = false
+  .showSyncProgress = false,
+  .hourlyBuzzer = false
 };
 
 static bool parseFloatQueryParam(const char *url, const char *key, float &outValue) {
@@ -1287,6 +1291,7 @@ void loadSettings() {
     settings.autoOtaCheckHours = AUTOOTA_CHECK_INTERVAL_HOURS_DEFAULT;
     settings.activeWeekdaysMask = WEEKDAY_MASK_ALL;
     settings.showSyncProgress = false;
+    settings.hourlyBuzzer = false;
   }
 
   // Если координаты в EEPROM невалидны (старая версия), пробуем извлечь их из сохраненного URL.
@@ -1335,6 +1340,7 @@ void loadSettings() {
   settings.activeWeekdaysMask &= WEEKDAY_MASK_ALL;
   // Новый bool в конце struct: старый EEPROM даёт 0xFF → не считать включённым.
   settings.showSyncProgress = (*(const uint8_t *)&settings.showSyncProgress == 1);
+  settings.hourlyBuzzer = (*(const uint8_t *)&settings.hourlyBuzzer == 1);
 
   displayUpsideDown = !!displayUpsideDown;
 }
@@ -1366,6 +1372,7 @@ bool exportSettingsToJson(String &outJson) {
   displayCfg["weekdayLanguageRu"] = settings.weekdayLanguageRu;
   displayCfg["uiLanguage"] = (settings.uiLanguage == UI_LANG_EN) ? "en" : "ru";
   displayCfg["showSyncProgress"] = settings.showSyncProgress;
+  displayCfg["hourlyBuzzer"] = settings.hourlyBuzzer;
 
   JsonObject night = doc.createNestedObject("nightMode");
   night["startH"] = settings.nightStartH;
@@ -1422,6 +1429,7 @@ bool importSettingsFromJson(const String &json, String &error) {
       newSettings.uiLanguage = (strcmp(lang, "en") == 0) ? UI_LANG_EN : UI_LANG_RU;
     }
     if (displayCfg.containsKey("showSyncProgress")) newSettings.showSyncProgress = displayCfg["showSyncProgress"];
+    if (displayCfg.containsKey("hourlyBuzzer")) newSettings.hourlyBuzzer = displayCfg["hourlyBuzzer"];
   }
 
   JsonObject night = doc["nightMode"];
@@ -2453,11 +2461,22 @@ uint32_t runCycle() {
     setDisplayState(false);
   }
 
-  if (timeValid && workdayEnabled && (ti.tm_min == 0) && !night && settings.hourlyBlink) {
-    ledPrepareOutputOff();
-    digitalWrite(LED_PIN, HIGH);
-    delay(80);
-    digitalWrite(LED_PIN, LOW);
+  if (timeValid && workdayEnabled && (ti.tm_min == 0) && !night &&
+      (settings.hourlyBlink || settings.hourlyBuzzer)) {
+    if (settings.hourlyBlink) {
+      ledPrepareOutputOff();
+      digitalWrite(LED_PIN, HIGH);
+    }
+    if (settings.hourlyBuzzer) {
+      digitalWrite(BUZZER_PIN, HIGH);
+    }
+    delay(settings.hourlyBuzzer ? BUZZER_BEEP_MS : 80UL);
+    if (settings.hourlyBlink) {
+      digitalWrite(LED_PIN, LOW);
+    }
+    if (settings.hourlyBuzzer) {
+      digitalWrite(BUZZER_PIN, LOW);
+    }
   }
 
   uint32_t sleepSeconds = 60;
@@ -2619,6 +2638,8 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);

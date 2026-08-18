@@ -88,6 +88,8 @@ String getConfigPage() {
   html += "<div class='checkbox-label'><input type='checkbox' name='showWeekday' " + String(settings.showWeekday ? "checked" : "") + "><label>Show weekday</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='timeFormat24h' " + String(settings.timeFormat24h ? "checked" : "") + "><label>24-hour format</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBlink' " + String(settings.hourlyBlink ? "checked" : "") + "><label>Hourly LED blink</label></div>";
+  html += "<div class='checkbox-label'><input type='checkbox' name='hourlyBuzzer' " + String(settings.hourlyBuzzer ? "checked" : "") + "><label>Hourly buzzer beep (GPIO20, ~50 ms)</label></div>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Active buzzer on GPIO20 → GND. Beeps once at the top of each hour (same conditions as LED blink). Default: off.</p>";
   html += "<div class='checkbox-label'><input type='checkbox' name='weekdayLanguageRu' " + String(settings.weekdayLanguageRu ? "checked" : "") + "><label>Weekday in Russian</label></div>";
   html += "<div class='checkbox-label'><input type='checkbox' name='showSyncProgress' " + String(settings.showSyncProgress ? "checked" : "") + "><label>Show sync progress on OLED</label></div>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>When enabled, network sync (WiFi/NTP/weather) replaces the clock screen and shows step results. Default: off.</p>";
@@ -285,6 +287,7 @@ void handleSave() {
     settings.showWeekday = server.hasArg("showWeekday");
     settings.timeFormat24h = server.hasArg("timeFormat24h");
     settings.hourlyBlink = server.hasArg("hourlyBlink");
+    settings.hourlyBuzzer = server.hasArg("hourlyBuzzer");
     settings.weekdayLanguageRu = server.hasArg("weekdayLanguageRu");
     settings.showSyncProgress = server.hasArg("showSyncProgress");
     if (server.hasArg("uiLanguage")) {
@@ -497,6 +500,7 @@ void handleSettingsExport() {
     if (server.hasArg("showWeekday")) preview.showWeekday = true; else preview.showWeekday = false;
     if (server.hasArg("timeFormat24h")) preview.timeFormat24h = true; else preview.timeFormat24h = false;
     if (server.hasArg("hourlyBlink")) preview.hourlyBlink = true; else preview.hourlyBlink = false;
+    preview.hourlyBuzzer = server.hasArg("hourlyBuzzer");
     if (server.hasArg("weekdayLanguageRu")) preview.weekdayLanguageRu = true; else preview.weekdayLanguageRu = false;
     preview.showSyncProgress = server.hasArg("showSyncProgress");
     if (server.hasArg("uiLanguage")) {
@@ -621,7 +625,7 @@ void updateConfigModeDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(12, 8);
-  display.println("--- НАСТРОЙКИ ---");
+  display.println("--- SETINGS ---");
   display.setCursor(0, 32);
   display.print("WiFi: ");
   display.print(AP_SSID);
@@ -634,8 +638,6 @@ void updateConfigModeDisplay() {
   display.setCursor(0, 88);
   display.print("ROM: ");
   display.println(ROM_VERSION);
-  display.setCursor(0, 108);
-  display.print("OLED: SH1107 128x128");
   display.display();
 }
 

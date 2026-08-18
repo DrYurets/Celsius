@@ -2,7 +2,10 @@
 Перед началом выполнения любой задачи АГЕНТ ДОЛЖЕН:
 1) Неукоснительно соблюдать требования, описанные в этом файле.
 2) Полностью перечитать `AGENTS.md` перед каждым началом выполнения задачи, так как он может постоянно дополняться/модифицироваться.
-3) **Версия прошивки `ROM_VERSION`**: не увеличивать номер версии в `Celsius.ino` без явного указания пользователя в задаче. Если изменения скетча по смыслу требуют новой версии (или пользователь просит bump), **перед правкой `ROM_VERSION` уточнить у пользователя**, следует ли поднять версию и как (например, patch / minor / major или точная строка). Вместе с `ROM_VERSION` обычно обновляют `project.json` (`version`, `releaseDate`, `whatsNew`/`notes`) для AutoOTA.
+3) **Версия прошивки `ROM_VERSION`**: не увеличивать номер версии в `Celsius.ino` без явного указания пользователя в задаче. Если изменения скетча по смыслу требуют новой версии (или пользователь просит bump), **перед правкой `ROM_VERSION` уточнить у пользователя**, следует ли поднять версию и как (например, patch / minor / major или точная строка). При bump **обязательно** синхронно обновить:
+   - `#define ROM_VERSION "..."` в `Celsius.ino`;
+   - комментарий в шапке `Celsius.ino`: `* ROM version: …` **и** `* Date: DD.MM.YYYY` (дата bump — «сегодня» по контексту сессии);
+   - `project.json` (`version`, `releaseDate`, `whatsNew`/`notes`) для AutoOTA.
 
 # Celsius Clock (ESP32-C3) — AGENTS knowledge base
 
@@ -23,7 +26,8 @@
 5. **Debug codes**: функции логирования на OLED (`logToDisplay`) завязаны на флаги показа дебага. Не нужно безусловно “засорять” OLED — используйте `settings.showDebugCodes` и существующие коды.
 
 ## Версия прошивки (`ROM_VERSION`)
-- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.13`).
+- В начале `Celsius.ino` задана строковая константа **`#define ROM_VERSION "..."`** — человекочитаемый идентификатор сборки (префикс железа + семантика, напр. `A1.4.14`).
+- В **шапке файла** (блок комментария) есть строки `* ROM version: …` и `* Date: DD.MM.YYYY` — при любом bump обе должны обновляться вместе с `ROM_VERSION` (дата = день bump).
 - Значение выводится на OLED в **режиме настройки** (SoftAP): строка `ROM: <ROM_VERSION>` в `updateConfigModeDisplay()`.
 - Для AutoOTA версия также задаётся в `project.json` (`version`, `releaseDate`, `whatsNew`/`notes`); после OTA/сборки бинарник обычно лежит в `build/esp32.esp32.esp32c3/Celsius.ino.bin`.
 - Агент **не меняет** `ROM_VERSION` про себя; см. пункт 3 в блоке **IMPORTANT** выше.
@@ -98,7 +102,7 @@
 
 ### EEPROM и сохранение настроек
 - Структура `DeviceSettings` (фрагмент актуальных полей):
-  - флаги отображения (debug, date, weekday, 12/24, hourly blink, **`showSyncProgress`**),
+  - флаги отображения (debug, date, weekday, 12/24, hourly blink, **`showSyncProgress`**, **`hourlyBuzzer`**),
   - night mode, timezone, timeCorrectionPerDay,
   - `syncDays` (legacy layout),
   - погода: `weatherEnabled`, координаты, `weatherApiUrl[768]`, **`weatherUpdateHours`** (NTP+погода), `weatherScreenSeconds`,
@@ -106,7 +110,8 @@
   - AutoOTA: `autoOtaEnabled`, `autoOtaCheckHours`,
   - `activeWeekdaysMask`.
 - Адреса: SSID `0`, PASS `64`, Settings `128`; `EEPROM_SIZE` 2048 + `static_assert`.
-- Дефолты: Open-Meteo, `weatherUpdateHours = 1`, `activeWeekdaysMask = WEEKDAY_MASK_ALL`, `forecast_days=4` в URL, **`showSyncProgress = false`**.
+- Дефолты: Open-Meteo, `weatherUpdateHours = 1`, `activeWeekdaysMask = WEEKDAY_MASK_ALL`, `forecast_days=4` в URL, **`showSyncProgress = false`**, **`hourlyBuzzer = false`**.
+- Активный зуммер: **`BUZZER_PIN` (GPIO20)** → GND; при смене часа (`tm_min == 0`, день, workday) короткий HIGH ~50 ms, если `hourlyBuzzer`.
 
 ### Экран прогресса синхронизации (`showSyncProgress`)
 - Опция в админке **Display Settings → Show sync progress on OLED** (по умолчанию выкл.).
@@ -200,7 +205,7 @@
 
 ## Практика разработки (рекомендации агенту)
 1. Перед изменением: перечитай `AGENTS.md`, выбери ветку/экран.
-2. **`ROM_VERSION` / `project.json`**: не bump самостоятельно; при запросе пользователя — согласовать точную строку/тип bump (или следовать явному «апни»).
+2. **`ROM_VERSION` / шапка `Celsius.ino` / `project.json`**: не bump самостоятельно; при запросе — обновить `#define`, `ROM version:` + `Date:` в шапке, и манифест AutoOTA.
 3. Сетевые функции: WiFi только на время операции, затем `WIFI_OFF`.
 4. OLED-дебаг только через `showDebugCodes` / `logToDisplay`.
 5. После правок: компиляция в Arduino IDE с **достаточной** partition scheme; проверить sleep и координаты.
