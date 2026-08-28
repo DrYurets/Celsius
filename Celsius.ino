@@ -1,8 +1,8 @@
 /*
 * Celsius Clock (ESP32-C3)
-* https://github.com/DrYurets/Celsius/tree/aht20bmp280
-* 
-* Date: 14.08.2026
+* ROM version: A1.4.14
+* https://github.com/DrYurets/Celsius/tree/128x64
+* Date: 28.08.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -41,7 +41,7 @@
 // SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
 #define AP_IP_ADDR IPAddress(192, 168, 4, 1)
 #define AP_IP_STR "192.168.4.1"
-#define ROM_VERSION "A1.4.13"
+#define ROM_VERSION "A1.4.14"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -1566,6 +1566,14 @@ static void drawOtaAvailableIcon(int16_t x) {
   display.fillRect(x + 4, y - 1, 1, 1, SSD1306_WHITE);
 }
 
+// Пиктограмма домика для внутренней температуры (~7x7 px)
+static void drawHomeIcon(int16_t x, int16_t y) {
+  display.fillRect(x + 3, y, 1, 1, SSD1306_WHITE);
+  display.fillRect(x + 2, y + 1, 3, 1, SSD1306_WHITE);
+  display.fillRect(x + 1, y + 2, 5, 1, SSD1306_WHITE);
+  display.drawRect(x + 1, y + 3, 5, 4, SSD1306_WHITE);
+}
+
 /*
 * Вывод на экран
 */
@@ -1594,11 +1602,12 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   display.setTextColor(SSD1306_WHITE);
 
   const int16_t topY = 0;
+  const int16_t bottomY = 51;  // 6x13 (~13 px) → низ экрана 64
   const int16_t screenW = (int16_t)display.width();
   const int16_t batReserve = 22;
   int16_t rightLimit = (int16_t)(screenW - batReserve);
 
-  // Верх: день недели → дата → indoor T/RH → OTA → батарея (как на 128x128)
+  // Верх: день недели → дата → OTA → батарея
   int16_t x = 0;
   if (settings.showWeekday) {
     const char *label;
@@ -1617,7 +1626,6 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
     snprintf(dateBuf, sizeof(dateBuf), "%02d.%02d", d, mo);
     display.setCursor(x, topY);
     display.print(dateBuf);
-    x = (int16_t)(x + display.getTextWidth(dateBuf) + 4);
   }
 
   if (otaUpdateAvailable) {
@@ -1626,27 +1634,7 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   }
   drawBattery(batBars);
 
-  // Indoor: температура и влажность между датой и OTA/батареей
-  {
-    char tBuf[8];
-    snprintf(tBuf, sizeof(tBuf), "%d", (int)tempC);
-    char hBuf[8];
-    snprintf(hBuf, sizeof(hBuf), "%d%%", (int)hum);
-    const int16_t degW = 4;
-    const int16_t gap = 3;
-    const int16_t needW =
-        (int16_t)(display.getTextWidth(tBuf) + degW + gap + display.getTextWidth(hBuf));
-    if (x + needW <= rightLimit) {
-      display.setCursor(x, topY);
-      display.print(tBuf);
-      const int16_t degX = (int16_t)(x + display.getTextWidth(tBuf) + 1);
-      drawDegreeMark(degX, topY);
-      display.setCursor((int16_t)(degX + degW + gap - 1), topY);
-      display.print(hBuf);
-    }
-  }
-
-  // Крупное время слева; справа — иконка текущей погоды + T + PoP
+  // Крупное время слева (+5 px); справа — иконка текущей погоды + T + PoP
   int displayH = h;
   if (!settings.timeFormat24h) {
     displayH = h % 12;
@@ -1669,11 +1657,12 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   const int colonSpace = 12;
   const int16_t fullW =
       (int16_t)(display.getTextWidth(lBuf) + display.getTextWidth(rBuf) + colonSpace);
-  // При погоде справа — время максимально влево; без погоды — по центру.
+  // При погоде справа — время влево; без погоды — по центру; затем +5 px вправо.
   int startX = showWeather ? 0 : ((int)timeAreaW - fullW) / 2;
   if (startX < 0) {
     startX = 0;
   }
+  startX += 5;
 
   display.setCursor(startX, timeY);
   display.print(lBuf);
@@ -1723,6 +1712,19 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       display.print(popBuf);
     }
   }
+
+  // Низ: домик + indoor T + влажность (как раньше)
+  display.setTextSize(1);
+  const int16_t homeX = 41;
+  drawHomeIcon(homeX, bottomY);
+  const int16_t inX = 52;
+  display.setCursor(inX, bottomY);
+  char inBuf[8];
+  snprintf(inBuf, sizeof(inBuf), "%d", (int)tempC);
+  display.print(inBuf);
+  drawDegreeMark((int16_t)(inX + display.getTextWidth(inBuf) + 1), (int16_t)(bottomY - 1));
+  display.setCursor(78, bottomY);
+  display.printf("%d%%", (int)hum);
 
   display.display();
   displayBackupValid = false;
