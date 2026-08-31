@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.14",
-  "releaseDate": "2026-08-28",
-  "whatsNew": "Indoor T/RH снова в нижней строке; время HH:MM сдвинуто на +5 px вправо.",
-  "notes": "A1.4.14: bottom-row indoor T/RH + home icon; clock startX += 5.",
+  "version": "A1.4.15",
+  "releaseDate": "2026-08-31",
+  "whatsNew": "Экраны погоды 1–7: нижние строки без клипа (U8g2); на экране настроек ROM на 1 px ниже.",
+  "notes": "A1.4.15: weather detail bottomY=51; config ROM cursor y=52.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",

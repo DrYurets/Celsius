@@ -628,7 +628,7 @@ void updateConfigModeDisplay() {
   display.print("IP: ");
   display.print(AP_IP_STR);
   // 6x13 ≈13 px высоты; y=56 обрезало низ — держим как нижнюю строку часов (~51)
-  display.setCursor(0, 51);
+  display.setCursor(0, 52);
   display.print("ROM: ");
   display.println(ROM_VERSION);
   display.display();

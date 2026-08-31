@@ -132,6 +132,7 @@ inline void drawWeatherIcon(DisplayT &display,
 /**
  * Одна страница подробной погоды (128×64, альбомная ориентация).
  * screenIndex: 0..6.
+ * U8g2 size1 (6x13): нижний текст не ниже y=51; size2 (10x20) — не ниже ≈41.
  */
 template <typename DisplayT>
 inline void drawWeatherDetailScreen(DisplayT &display,
@@ -155,10 +156,11 @@ inline void drawWeatherDetailScreen(DisplayT &display,
   display.clearDisplay();
   display.setTextColor(1);
 
+  constexpr int16_t kBottomTextY = 51;
+
   display.setTextSize(1);
-  display.setCursor(116, 56); // номер экрана
+  display.setCursor(116, kBottomTextY); // номер экрана
   display.print((int)(screenIndex + 1));
-  
 
   switch (screenIndex) {
     case 0: {
@@ -177,16 +179,16 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.print("С");
 
       display.setTextSize(1);
-      display.setCursor(0, 32);
+      display.setCursor(0, 30);
       display.print("Ощущается как");
       char fBuf[16];
       formatSignedTemp(fBuf, sizeof(fBuf), feelsLikeC);
       display.setTextSize(2);
-      display.setCursor(0, 44);
+      display.setCursor(0, 41);
       display.print(fBuf);
       int16_t xAfterF = display.getTextWidth(fBuf);
-      drawDegreeMark(display, xAfterF + 1, 46);
-      display.setCursor(xAfterF + 7, 44);
+      drawDegreeMark(display, xAfterF + 1, 43);
+      display.setCursor(xAfterF + 7, 41);
       display.print("С");
       break;
     }
@@ -204,7 +206,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print("м/с");
       }
       display.setTextSize(1);
-      display.setCursor(0, 32);
+      display.setCursor(0, 30);
       display.print("Направление ветра");
       {
         char dirLabel[16];
@@ -217,7 +219,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
           snprintf(dirLabel, sizeof(dirLabel), "--");
           degBuf[0] = '\0';
         }
-        constexpr int16_t kWindDirTextY = 42;
+        constexpr int16_t kWindDirTextY = 41;
         display.setTextSize(2);
         display.setCursor(0, kWindDirTextY);
         display.print(dirLabel);
@@ -277,10 +279,10 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.setCursor(28, 18);
       display.print("%");
 
-      display.setCursor(0, 32);
+      display.setCursor(0, 30);
       display.print("Атмосферное давление");
       display.setTextSize(2);
-      display.setCursor(0, 44);
+      display.setCursor(0, 41);
       if (isnan(pressureHpa)) {
         display.print("--");
       } else {
@@ -290,7 +292,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print(buf);
       }
       display.setTextSize(1);
-      display.setCursor(42, 50);
+      display.setCursor(42, kBottomTextY);
       display.print("мм рт.ст");
       break;
     }
@@ -312,7 +314,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.setCursor(42, 31);
       display.print("Ночью:");
       int16_t nightIconX = 86;
-      display.setCursor(42, 48);
+      display.setCursor(42, kBottomTextY);
       if (isnan(nightMin)) {
         display.print("--");
         nightIconX = 58;
@@ -322,8 +324,8 @@ inline void drawWeatherDetailScreen(DisplayT &display,
         display.print(nBuf);
         display.setTextSize(1);
         const int16_t xAfter = (int16_t)(42 + display.getTextWidth(nBuf));
-        drawDegreeMark(display, xAfter + 1, 48);
-        display.setCursor(xAfter + 7, 48);
+        drawDegreeMark(display, xAfter + 1, kBottomTextY);
+        display.setCursor(xAfter + 7, kBottomTextY);
         display.print("С");
         nightIconX = xAfter + 16;
       }
@@ -357,7 +359,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       display.print("/");
       display.print(nightBuf);
 
-      display.setCursor(40, 40);
+      display.setCursor(40, 39);
       display.print("Ветер: ");
       if (isnan(dayWind)) display.print("--");
       else {
@@ -367,7 +369,7 @@ inline void drawWeatherDetailScreen(DisplayT &display,
       }
       display.print("м/с");
 
-      display.setCursor(40, 56);
+      display.setCursor(40, kBottomTextY);
       display.print("Осадки: ");
       if (isnan(dayPrecip)) display.print("--%");
       else {
