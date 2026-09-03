@@ -92,16 +92,6 @@ Device enters setup mode when WiFi config is missing, invalid, or initial setup 
 
 Root file `settings.json` contains baseline defaults for provisioning and mass setup.
 
-### Local image assets for setup mode
-
-- Sensor JPG files are embedded into firmware and served by the web server.
-- Expected paths:
-  - `/sensors/sht31/sht31.jpg`
-  - `/sensors/aht20bmp280/aht20bmp280.jpg`
-  - `/sensors/aht21/aht21.jpg`
-  - `/sensors/htu21/htu21.jpg`
-  - `/sensors/bmi160/bmi160.jpg`
-
 ## OTA
 
 ### Web OTA

@@ -2,11 +2,6 @@
 #define WEB_CONFIG_SERVER_H
 
 #include "sensors/SensorTypes.h"
-#include "sensors/sht31/SHT31Image.h"
-#include "sensors/aht20bmp280/AHT20BMP280Image.h"
-#include "sensors/aht21/AHT21Image.h"
-#include "sensors/htu21/HTU21Image.h"
-#include "sensors/bmi160/BMI160Image.h"
 
 static bool otaPrecheck(String &reason) {
   if (!configMode) {
@@ -41,7 +36,6 @@ void handleOtaUpload();
 void handleOtaDone();
 void handleSettingsExport();
 void handleSettingsImport();
-void handleSensorImage();
 
 String getConfigPage() {
   uint8_t weekdaysMask = settings.activeWeekdaysMask & WEEKDAY_MASK_ALL;
@@ -63,10 +57,6 @@ String getConfigPage() {
   html += ".radio-label { display: flex; align-items: center; margin: 10px 0; }";
   html += ".time-group { display: flex; gap: 10px; }";
   html += ".time-group input { width: 50%; }";
-  html += ".sensor-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 14px 0; }";
-  html += ".sensor-card { border: 1px solid #555; border-radius: 8px; padding: 8px; background: #242424; }";
-  html += ".sensor-card img { width: 100%; height: 92px; object-fit: cover; border-radius: 6px; display: block; margin-bottom: 6px; }";
-  html += ".sensor-card .name { font-size: 12px; color: #ddd; text-align: center; }";
   html += "button { background: #4CAF50; color: white; padding: 15px; border: none; border-radius: 5px; cursor: pointer; width: 100%; font-size: 16px; }";
   html += "button:hover { background: #45a049; }";
   html += ".container { background: #2a2a2a; padding: 20px; border-radius: 10px; }";
@@ -101,13 +91,6 @@ String getConfigPage() {
 
   html += "<h2>Device Configuration</h2>";
   html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Select the installed sensors. Temperature sensor can be only one.</p>";
-  html += "<div class='sensor-gallery'>";
-  html += "<div class='sensor-card'><img src='/sensors/sht31/sht31.jpg' alt='SHT31'><div class='name'>SHT31</div></div>";
-  html += "<div class='sensor-card'><img src='/sensors/aht20bmp280/aht20bmp280.jpg' alt='AHT20+BMP280'><div class='name'>AHT20+BMP280</div></div>";
-  html += "<div class='sensor-card'><img src='/sensors/aht21/aht21.jpg' alt='AHT21'><div class='name'>AHT21</div></div>";
-  html += "<div class='sensor-card'><img src='/sensors/htu21/htu21.jpg' alt='HTU21'><div class='name'>HTU21</div></div>";
-  html += "<div class='sensor-card'><img src='/sensors/bmi160/bmi160.jpg' alt='BMI160'><div class='name'>BMI160 (Gyro/Motion)</div></div>";
-  html += "</div>";
   html += "<label>Temperature/Humidity sensor:</label>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='sht31' " + String(strcmp(selectedTempSensor, "sht31") == 0 ? "checked" : "") + "><label>SHT31</label></div>";
   html += "<div class='radio-label'><input type='radio' name='tempSensorType' value='aht20bmp280' " + String(strcmp(selectedTempSensor, "aht20bmp280") == 0 ? "checked" : "") + "><label>AHT20 + BMP280</label></div>";
@@ -592,34 +575,6 @@ void handleSettingsImport() {
   ESP.restart();
 }
 
-void handleSensorImage() {
-  String uri = server.uri();
-  const uint8_t *data = nullptr;
-  size_t len = 0;
-
-  if (uri == "/sensors/sht31/sht31.jpg") {
-    data = sensors_sht31_sht31_jpg;
-    len = sensors_sht31_sht31_jpg_len;
-  } else if (uri == "/sensors/aht20bmp280/aht20bmp280.jpg") {
-    data = sensors_aht20bmp280_aht20bmp280_jpg;
-    len = sensors_aht20bmp280_aht20bmp280_jpg_len;
-  } else if (uri == "/sensors/aht21/aht21.jpg") {
-    data = sensors_aht21_aht21_jpg;
-    len = sensors_aht21_aht21_jpg_len;
-  } else if (uri == "/sensors/htu21/htu21.jpg") {
-    data = sensors_htu21_htu21_jpg;
-    len = sensors_htu21_htu21_jpg_len;
-  } else if (uri == "/sensors/bmi160/bmi160.jpg") {
-    data = sensors_bmi160_bmi160_jpg;
-    len = sensors_bmi160_bmi160_jpg_len;
-  } else {
-    server.send(404, "text/plain", "Image not found");
-    return;
-  }
-
-  server.send_P(200, "image/jpeg", (PGM_P)data, len);
-}
-
 void updateConfigModeDisplay() {
   applyDisplayOrientation();
   display.clearDisplay();
@@ -660,11 +615,13 @@ void startConfigMode() {
     WiFi.mode(WIFI_OFF);
     delay(120);
     WiFi.mode(WIFI_AP);
+    // Как в STA: без modem sleep SoftAP иначе «ползёт», OTA рвётся (NS_ERROR_NET_EMPTY_RESPONSE).
+    WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_15dBm);
     delay(80);
     // Force classic SoftAP address so OLED / clients always use 192.168.4.1
     WiFi.softAPConfig(apIp, apGw, apMask);
-    apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD);
+    apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
     if (!apStarted) {
       delay(200);
     }
@@ -691,11 +648,6 @@ void startConfigMode() {
 
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
-  server.on("/sensors/sht31/sht31.jpg", HTTP_GET, handleSensorImage);
-  server.on("/sensors/aht20bmp280/aht20bmp280.jpg", HTTP_GET, handleSensorImage);
-  server.on("/sensors/aht21/aht21.jpg", HTTP_GET, handleSensorImage);
-  server.on("/sensors/htu21/htu21.jpg", HTTP_GET, handleSensorImage);
-  server.on("/sensors/bmi160/bmi160.jpg", HTTP_GET, handleSensorImage);
   server.on("/settings/export", HTTP_GET, handleSettingsExport);
   server.on("/settings/export", HTTP_POST, handleSettingsExport);
   server.on("/settings/import", HTTP_POST, handleSettingsImport);

@@ -1,8 +1,8 @@
 /*
 * Celsius Clock
-* ROM version: A1.4.14
+* ROM version: A1.4.16
 * https://github.com/DrYurets/Celsius/tree/128x128
-* Date: 18.08.2026
+* Date: 01.09.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -44,7 +44,7 @@
 // SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
 #define AP_IP_ADDR IPAddress(192, 168, 4, 1)
 #define AP_IP_STR "192.168.4.1"
-#define ROM_VERSION "A1.4.14"
+#define ROM_VERSION "A1.4.16"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -151,6 +151,41 @@
 #define CODE_BMI160_OK "BMI160 ok"
 #define CODE_BMI160_ERR "BMI160 fail"
 
+// GPIO0 = LED + кнопка. На ESP32-C3 (ADC1_CH0 / RTC) I2C, ADC и смена конфигов GPIO
+// могут кратковременно включить внутренний pullup → вспышка LED «вполнакала» в момент
+// перерисовки OLED. gpio_hold фиксирует OUTPUT LOW, пока не читаем кнопку / не моргаем.
+static void ledPrepareOutputOff() {
+  gpio_hold_dis((gpio_num_t)LED_PIN);
+  gpio_pullup_dis((gpio_num_t)LED_PIN);
+  gpio_pulldown_dis((gpio_num_t)LED_PIN);
+  gpio_set_direction((gpio_num_t)LED_PIN, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)LED_PIN, 0);
+  gpio_hold_en((gpio_num_t)LED_PIN);
+}
+
+static void ledUnlockForButtonOrBlink() {
+  gpio_hold_dis((gpio_num_t)LED_PIN);
+}
+
+static void otaButtonPrepareInput() {
+  ledUnlockForButtonOrBlink();
+  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
+  gpio_pullup_en((gpio_num_t)OTA_BUTTON_PIN);
+  gpio_pulldown_dis((gpio_num_t)OTA_BUTTON_PIN);
+}
+
+/** Краткий sample: PULLUP → read → сразу OUTPUT LOW + hold. */
+static bool otaButtonSampleLow() {
+  ledUnlockForButtonOrBlink();
+  gpio_set_direction((gpio_num_t)OTA_BUTTON_PIN, GPIO_MODE_INPUT);
+  gpio_pullup_en((gpio_num_t)OTA_BUTTON_PIN);
+  gpio_pulldown_dis((gpio_num_t)OTA_BUTTON_PIN);
+  delayMicroseconds(5);
+  const bool low = (gpio_get_level((gpio_num_t)OTA_BUTTON_PIN) == 0);
+  ledPrepareOutputOff();
+  return low;
+}
+
 class OledDisplayCompat {
  public:
   // SH1107: Adafruit_SH110X (буфер/графика) + U8g2_for_Adafruit_GFX (UTF-8/кириллица).
@@ -168,12 +203,16 @@ class OledDisplayCompat {
     u8g_.setForegroundColor(SH110X_WHITE);
     u8g_.setBackgroundColor(SH110X_BLACK);
     setTextSize(1);
-    oled_.display();
+    display();  // через обёртку: LED hold перед I2C
     return true;
   }
 
   void clearDisplay() { oled_.clearDisplay(); }
-  void display() { oled_.display(); }
+  void display() {
+    // До I2C-пуша кадра: удержать GPIO0 в LOW (иначе вспышка LED на ESP32-C3).
+    ledPrepareOutputOff();
+    oled_.display();
+  }
 
   void setTextSize(uint8_t size) {
     textSize_ = (uint8_t)constrain((int)size, 1, 4);
@@ -641,33 +680,16 @@ bool isWeatherButtonPressed() {
   return readDebouncedLow(WEATHER_BUTTON_PIN);
 }
 
-/** GPIO0 совмещён с LED: перед чтением кнопки — INPUT_PULLUP. */
-static void otaButtonPrepareInput() {
-  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
-  gpio_pullup_en((gpio_num_t)OTA_BUTTON_PIN);
-  gpio_pulldown_dis((gpio_num_t)OTA_BUTTON_PIN);
-}
-
-static void ledPrepareOutputOff() {
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-}
-
-/** Краткий sample: PULLUP → read → сразу OUTPUT LOW (иначе LED «вполнакала» на всё окно). */
-static bool otaButtonSampleLow() {
-  otaButtonPrepareInput();
-  delayMicroseconds(40);
-  const bool low = (digitalRead(OTA_BUTTON_PIN) == LOW);
-  ledPrepareOutputOff();
-  return low;
-}
-
 bool isOtaInfoButtonPressed() {
-  otaButtonPrepareInput();
-  const bool pressed = readDebouncedLow(OTA_BUTTON_PIN);
-  // Не оставлять PULLUP: через него LED на GPIO0 горит «вполнакала».
-  ledPrepareOutputOff();
-  return pressed;
+  // Только для редких UI (OTA/сброс), не вызывать перед каждой отрисовкой часов.
+  uint8_t lowCount = 0;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (otaButtonSampleLow()) {
+      lowCount++;
+    }
+    delay(1);
+  }
+  return lowCount >= 2;
 }
 
 static void fetchOtaManifestMeta(String *releaseDate, String *whatsNew) {
@@ -2231,6 +2253,8 @@ uint32_t runCycle() {
     float measured = readBattery();
     uint16_t rawADC = analogRead(BAT_PIN);
     storedRawAdc = rawADC;
+    // ADC на соседнем RTC-GPIO иногда сбрасывает конфиг GPIO0 → вернуть LED в hold/LOW.
+    ledPrepareOutputOff();
 
     int mappedValue = map(
       (int)(measured * 100),
@@ -2338,14 +2362,17 @@ uint32_t runCycle() {
   if (!timeValid) {
     logToDisplay(CODE_NTP_ERROR, "Wait NTP", 0);
   } else if (!night && workdayEnabled) {
+    ledPrepareOutputOff();
     setDisplayState(true);
     setBrightness(0x01);
     updateDisplayOrientationFromBmi160();
     applyDisplayOrientation();
+    ledPrepareOutputOff();
 
     bool weatherButtonPressedNow = isWeatherButtonPressed();
-    bool otaButtonPressedNow = isOtaInfoButtonPressed();
-    if (otaUpdateAvailable && (wokeByOtaButton || otaButtonPressedNow)) {
+    // GPIO0 = LED: не опрашивать PULLUP до drawClock — иначе вспышка в начале кадра.
+    // OTA-экран: short-click в idle после часов (или редкий wokeByOtaButton).
+    if (otaUpdateAvailable && wokeByOtaButton) {
       showOtaUpdateInfoScreen();
     } else if (wokeByWeatherButton || weatherButtonPressedNow) {
       // Страницы погоды (0..6) + статус (7): версия, последняя NTP/погода.
@@ -2406,52 +2433,54 @@ uint32_t runCycle() {
     }
 
     // GPIO0: короткое нажатие → OTA (если есть), удержание ~5 с → сброс WiFi.
-    // Sample импульсами (не держим PULLUP — иначе LED горит вполнакала всё окно).
+    // Редкий импульсный sample (не каждый кадр до OLED и не 50 Гц) — иначе вспышки LED.
     {
       const uint32_t idleWaitMs = otaUpdateAvailable ? 2500UL : 400UL;
       const uint32_t waitEnd = millis() + idleWaitMs;
+      const uint32_t pollEveryMs = otaUpdateAvailable ? 40UL : 80UL;
       uint32_t pressAt = 0;
       bool holding = false;
-      bool prevLow = otaButtonSampleLow();
-      if (prevLow) {
-        holding = true;
-        pressAt = millis();
-      }
+      bool prevLow = false;
       bool didAction = false;
+      // Не сэмплировать сразу после кадра — иначе вспышка «в начале» активной фазы.
+      uint32_t lastPoll = millis();
       while (!didAction) {
         const uint32_t now = millis();
-        const bool low = otaButtonSampleLow();
-        if (low && !prevLow) {
-          holding = true;
-          pressAt = now;
-        }
-        if (holding && low) {
-          const uint32_t held = (uint32_t)(now - pressAt);
-          if (held >= 800UL) {
-            otaButtonPrepareInput();  // continuous read на экране сброса
-            if (factoryResetHoldConfirm(kFactoryResetRuntimeHoldMs, held)) {
-              performFactoryResetAndReboot("GPIO0 hold after clock");
+        if ((uint32_t)(now - lastPoll) >= pollEveryMs || holding) {
+          lastPoll = now;
+          const bool low = otaButtonSampleLow();
+          if (low && !prevLow) {
+            holding = true;
+            pressAt = now;
+          }
+          if (holding && low) {
+            const uint32_t held = (uint32_t)(now - pressAt);
+            if (held >= 800UL) {
+              otaButtonPrepareInput();  // continuous read на экране сброса
+              if (factoryResetHoldConfirm(kFactoryResetRuntimeHoldMs, held)) {
+                performFactoryResetAndReboot("GPIO0 hold after clock");
+              }
+              ledPrepareOutputOff();
+              drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
+              didAction = true;
+              break;
             }
-            ledPrepareOutputOff();
-            drawClock(ti.tm_mday, ti.tm_mon + 1, ti.tm_hour, ti.tm_min, batBars, ti.tm_wday);
+          }
+          if (!low && prevLow && holding) {
+            const uint32_t held = (uint32_t)(now - pressAt);
+            holding = false;
+            if (held < kOtaShortClickMaxMs && otaUpdateAvailable) {
+              showOtaUpdateInfoScreen();
+            }
             didAction = true;
             break;
           }
+          prevLow = low;
         }
-        if (!low && prevLow && holding) {
-          const uint32_t held = (uint32_t)(now - pressAt);
-          holding = false;
-          if (held < kOtaShortClickMaxMs && otaUpdateAvailable) {
-            showOtaUpdateInfoScreen();
-          }
-          didAction = true;
+        if (!holding && !prevLow && (int32_t)(now - waitEnd) >= 0) {
           break;
         }
-        prevLow = low;
-        if (!holding && !low && (int32_t)(now - waitEnd) >= 0) {
-          break;
-        }
-        delay(20);
+        delay(holding ? 20 : pollEveryMs);
       }
       ledPrepareOutputOff();
     }
@@ -2464,15 +2493,16 @@ uint32_t runCycle() {
   if (timeValid && workdayEnabled && (ti.tm_min == 0) && !night &&
       (settings.hourlyBlink || settings.hourlyBuzzer)) {
     if (settings.hourlyBlink) {
-      ledPrepareOutputOff();
-      digitalWrite(LED_PIN, HIGH);
+      ledUnlockForButtonOrBlink();
+      gpio_set_direction((gpio_num_t)LED_PIN, GPIO_MODE_OUTPUT);
+      gpio_set_level((gpio_num_t)LED_PIN, 1);
     }
     if (settings.hourlyBuzzer) {
       digitalWrite(BUZZER_PIN, HIGH);
     }
     delay(settings.hourlyBuzzer ? BUZZER_BEEP_MS : 80UL);
     if (settings.hourlyBlink) {
-      digitalWrite(LED_PIN, LOW);
+      ledPrepareOutputOff();
     }
     if (settings.hourlyBuzzer) {
       digitalWrite(BUZZER_PIN, LOW);
@@ -2521,13 +2551,14 @@ void enterDeepSleep(uint32_t sleepSeconds) {
     }
   }
 #endif
-  // Пробуждение только GPIO4 (погода). GPIO0 = LED: в сне держим OUTPUT LOW,
-  // иначе INPUT_PULLUP подсвечивает светодиод всю минуту сна.
+  // Пробуждение только GPIO4 (погода). GPIO0 = LED: в сне держим OUTPUT LOW + hold,
+  // иначе INPUT_PULLUP / сброс RTC-GPIO подсвечивает светодиод.
   // OTA-кнопка читается в активной фазе (таймер / после иконки обновления).
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
   gpio_pullup_en((gpio_num_t)WEATHER_BUTTON_PIN);
   gpio_pulldown_dis((gpio_num_t)WEATHER_BUTTON_PIN);
   ledPrepareOutputOff();
+  gpio_deep_sleep_hold_en();
   esp_deep_sleep_enable_gpio_wakeup((1ULL << WEATHER_BUTTON_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
   esp_deep_sleep_start();
@@ -2535,6 +2566,7 @@ void enterDeepSleep(uint32_t sleepSeconds) {
 
 void setup() {
   Serial.begin(9600);
+  gpio_deep_sleep_hold_dis();
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   esp_reset_reason_t resetReason = esp_reset_reason();
   wokeByWeatherButton = false;
@@ -2597,11 +2629,12 @@ void setup() {
 #endif
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    pinMode(LED_PIN, OUTPUT);
+    ledUnlockForButtonOrBlink();
+    gpio_set_direction((gpio_num_t)LED_PIN, GPIO_MODE_OUTPUT);
     for (;;) {
-      digitalWrite(LED_PIN, HIGH);
+      gpio_set_level((gpio_num_t)LED_PIN, 1);
       delay(200);
-      digitalWrite(LED_PIN, LOW);
+      gpio_set_level((gpio_num_t)LED_PIN, 0);
       delay(200);
     }
   }
@@ -2636,8 +2669,7 @@ void setup() {
                 (int)indoorBmpOk);
   logToDisplay(sensorOK ? CODE_SENSOR_OK : CODE_SENSOR_MISSING);
 
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  ledPrepareOutputOff();
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
   pinMode(WEATHER_BUTTON_PIN, INPUT_PULLUP);
@@ -2706,9 +2738,9 @@ void setup() {
 
 void loop() {
   if (configMode) {
-    // Обработка запросов веб-сервера в режиме настройки
+    // Без лишнего delay: иначе upload OTA/страница ждут между chunk'ами.
     server.handleClient();
-    delay(10);
+    yield();
   } else {
     // Не используется: устройство просыпается из deep sleep и сразу выполняет setup()
   }
