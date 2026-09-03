@@ -1,8 +1,8 @@
 /*
 * Celsius Clock
-* ROM version: A1.4.16
+* ROM version: A1.4.17
 * https://github.com/DrYurets/Celsius/tree/128x128
-* Date: 01.09.2026
+* Date: 03.09.2026
 * Copyright (c) 2026 DrYurets
 */
 
@@ -44,7 +44,7 @@
 // SoftAP gateway/IP shown on OLED and used by clients after joining CelsiusClock.
 #define AP_IP_ADDR IPAddress(192, 168, 4, 1)
 #define AP_IP_STR "192.168.4.1"
-#define ROM_VERSION "A1.4.16"
+#define ROM_VERSION "A1.4.17"
 #define EEPROM_SSID_ADDR 0
 #define EEPROM_PASS_ADDR 64
 #define EEPROM_SETTINGS_ADDR 128
@@ -335,6 +335,9 @@ class OledDisplayCompat {
     }
     oled_.drawBitmap(x, y, bmp, w, h, SH110X_WHITE);
   }
+  void drawPixel(int16_t x, int16_t y, uint16_t color) {
+    oled_.drawPixel(x, y, color ? SH110X_WHITE : SH110X_BLACK);
+  }
 
   void ssd1306_command(uint8_t cmd) {
     if (waitContrast_) {
@@ -616,6 +619,39 @@ static uint32_t secondsUntilNightEnd(int hour, int min, int sec) {
   return (uint32_t)delta;
 }
 
+/** Ночной сон включён, если start ≠ end (равные значения = режим сна выкл.). */
+static bool nightModeSleepEnabled() {
+  return settings.nightStartH != settings.nightEndH ||
+         settings.nightStartM != settings.nightEndM;
+}
+
+/**
+ * Принудительный сетевой цикл ради sunrise/sunset:
+ * - с ночным сном: первый дневной цикл, когда ещё нет данных на сегодня;
+ * - без ночного сна: в час 00:xx.
+ */
+static bool shouldForceNetworkForSunTimes(time_t local, bool night, bool workdayEnabled) {
+  if (!settings.weatherEnabled || local <= 100000 || !workdayEnabled || night) {
+    return false;
+  }
+  if (!needSunTimesRefresh(local, settings.weatherEnabled)) {
+    return false;
+  }
+  // Не чаще ~5 мин при ошибке fetch (иначе после nightEnd долбили бы каждую минуту).
+  if (lastNetworkUpdate != 0) {
+    time_t delta = local - lastNetworkUpdate;
+    if (delta >= 0 && (uint32_t)delta < 300UL) {
+      return false;
+    }
+  }
+  if (nightModeSleepEnabled()) {
+    return true;
+  }
+  struct tm ti = {};
+  localtime_r(&local, &ti);
+  return ti.tm_hour == 0;
+}
+
 static bool sensorOK = false;
 static float tempC = 22.0;
 static float hum = 50.0;
@@ -637,6 +673,10 @@ static constexpr uint32_t kOtaShortClickMaxMs = 800UL;
 
 // ---------- утилиты ----------
 bool isNight(int h, int m = 0) {
+  // start==end → ночной сон выключен (часы не уходят в длинный sleep до morning).
+  if (!nightModeSleepEnabled()) {
+    return false;
+  }
   int startMinutes = settings.nightStartH * 60 + settings.nightStartM;
   int endMinutes = settings.nightEndH * 60 + settings.nightEndM;
   int currentMinutes = h * 60 + m;
@@ -1840,6 +1880,121 @@ static void formatSignedIntCompact(char *out, size_t outSize, float t) {
   }
 }
 
+/** Компактное солнце (~9×9) для трека восход→закат. */
+static void drawSunGlyphSmall(int16_t cx, int16_t cy) {
+  display.fillRect(cx - 1, cy - 1, 3, 3, SSD1306_WHITE);
+  display.drawPixel(cx, cy - 4, SSD1306_WHITE);
+  display.drawPixel(cx, cy + 4, SSD1306_WHITE);
+  display.drawPixel(cx - 4, cy, SSD1306_WHITE);
+  display.drawPixel(cx + 4, cy, SSD1306_WHITE);
+  display.drawPixel(cx - 3, cy - 3, SSD1306_WHITE);
+  display.drawPixel(cx + 3, cy - 3, SSD1306_WHITE);
+  display.drawPixel(cx - 3, cy + 3, SSD1306_WHITE);
+  display.drawPixel(cx + 3, cy + 3, SSD1306_WHITE);
+}
+
+/** Пиксель внутри bounding box глифа (~9×9) — не рисовать точку трека. */
+static bool sunGlyphCoversPixel(int16_t px, int16_t py, int16_t cx, int16_t cy) {
+  constexpr int16_t kR = 4;
+  return px >= (int16_t)(cx - kR) && px <= (int16_t)(cx + kR) &&
+         py >= (int16_t)(cy - kR) && py <= (int16_t)(cy + kR);
+}
+
+/** Y на дуге восход→закат: края внизу экрана, вершина в yApex (sin-дуга). */
+static int16_t sunPathArcY(float t, int16_t yApex, int16_t yBottom) {
+  if (t < 0.0f) {
+    t = 0.0f;
+  } else if (t > 1.0f) {
+    t = 1.0f;
+  }
+  const float rise = (float)(yBottom - yApex);
+  // t=0/1 → низ; t=0.5 → вершина.
+  const float y = (float)yBottom - rise * sinf(t * 3.14159265f);
+  return (int16_t)lroundf(y);
+}
+
+/**
+ * Точки пути солнца: 1 px на каждый полный час светового дня + 2 px (восход и закат).
+ * Дуга: края у низа экрана, вершина на прежней высоте центра иконки; солнце едет по дуге.
+ * Точки внутри иконки солнца не рисуются.
+ */
+static void drawSunPathTrack(int hour, int minute) {
+  const int16_t screenW = (int16_t)display.width();
+  const int16_t screenH = (int16_t)display.height();
+  if (screenW <= 0 || screenH <= 0) {
+    return;
+  }
+  if (weatherSunriseHour < 0 || weatherSunsetHour < 0 ||
+      weatherSunriseMin < 0 || weatherSunsetMin < 0) {
+    return;
+  }
+
+  const int riseM = (int)weatherSunriseHour * 60 + (int)weatherSunriseMin;
+  const int setM = (int)weatherSunsetHour * 60 + (int)weatherSunsetMin;
+  if (setM <= riseM) {
+    return;
+  }
+
+  constexpr int16_t kSunHalf = 4;  // глиф ~9×9
+  const int16_t yApex = (int16_t)(screenH - 1 - kSunHalf);
+  const int16_t yBottom = (int16_t)(screenH - 1);
+  const int16_t x0 = kSunHalf;
+  const int16_t travel = (int16_t)(screenW - 1 - 2 * kSunHalf);
+  if (travel <= 0) {
+    return;
+  }
+
+  const int nowM = hour * 60 + minute;
+  float progress;
+  if (nowM <= riseM) {
+    progress = 0.0f;
+  } else if (nowM >= setM) {
+    progress = 1.0f;
+  } else {
+    progress = (float)(nowM - riseM) / (float)(setM - riseM);
+  }
+
+  int16_t cx = (int16_t)(x0 + (int16_t)lroundf(progress * (float)travel));
+  if (cx < x0) {
+    cx = x0;
+  }
+  if (cx > x0 + travel) {
+    cx = (int16_t)(x0 + travel);
+  }
+  const int16_t cy = sunPathArcY(progress, yApex, yBottom);
+
+  // Полные часы светового дня + пиксели восхода и заката.
+  int dayHours = (setM - riseM) / 60;
+  if (dayHours < 0) {
+    dayHours = 0;
+  }
+  int nDots = dayHours + 2;
+  if (nDots < 2) {
+    nDots = 2;
+  }
+  // Не чаще одного пикселя на столбец экрана.
+  if (nDots > travel + 1) {
+    nDots = travel + 1;
+  }
+
+  for (int i = 0; i < nDots; ++i) {
+    float t = (nDots <= 1) ? 0.0f : (float)i / (float)(nDots - 1);
+    int16_t x;
+    if (nDots <= 1) {
+      x = x0;
+    } else {
+      x = (int16_t)(x0 + (int32_t)i * travel / (nDots - 1));
+    }
+    const int16_t y = sunPathArcY(t, yApex, yBottom);
+    if (sunGlyphCoversPixel(x, y, cx, cy)) {
+      continue;
+    }
+    display.drawPixel(x, y, SSD1306_WHITE);
+  }
+
+  drawSunGlyphSmall(cx, cy);
+}
+
 void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
   sanitizeOtaUpdateFlag();
   updateDisplayOrientationFromBmi160();
@@ -1977,14 +2132,14 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       display.print(popBuf);
     }
 
-    // Три колонки: час → иконка → T → PoP (всегда h+1, h+2, h+3)
+    // Три колонки: час → иконка → T → PoP (всегда h+1, h+2, h+3); −4 px под трек солнца снизу
     int8_t colHour[kWeatherHourlyAheadCount];
     float colTemp[kWeatherHourlyAheadCount];
     float colPop[kWeatherHourlyAheadCount];
     int32_t colWmo[kWeatherHourlyAheadCount];
     weatherHourlyAheadForClock(h, colHour, colTemp, colPop, colWmo);
 
-    const int16_t colY0 = 66;
+    const int16_t colY0 = 62;
     const int16_t colW = screenW / 3;
     for (int k = 0; k < kWeatherHourlyAheadCount; ++k) {
       const int16_t colLeft = (int16_t)(k * colW);
@@ -2044,6 +2199,9 @@ void drawClock(int d, int mo, int h, int m, uint8_t batBars, uint8_t wday) {
       }
     }
   }
+
+  // Нижний ряд: штриховая линия пути солнца + иконка по прогрессу восход→закат.
+  drawSunPathTrack(h, m);
 
   display.display();
   displayBackupValid = false;
@@ -2287,8 +2445,16 @@ uint32_t runCycle() {
   // Ориентацию по BMI160 читаем не здесь, а непосредственно перед отрисовкой: до drawClock()
   // может уйти много времени на WiFi/NTP/погоду — иначе переворот «после пробуждения» не попадает в выборку.
 
-  // NTP + погода по одному интервалу (weatherUpdateHours), только в активном дневном режиме
-  if (timeValid && workdayEnabled && !night && shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled)) {
+  // NTP + погода по одному интервалу (weatherUpdateHours), только в активном дневном режиме.
+  // Sunrise/sunset: без ночного сна — форс в 00:xx; с ночным сном — первый дневной fetch после пробуждения.
+  const bool forceSunNetwork =
+      shouldForceNetworkForSunTimes(local, night, workdayEnabled);
+  if (timeValid && workdayEnabled && !night &&
+      (shouldUpdateNetwork(local, settings.weatherUpdateHours, settings.weatherEnabled) ||
+       forceSunNetwork)) {
+    if (forceSunNetwork) {
+      Serial.println("[Net] force update for sunrise/sunset");
+    }
     logToDisplay(CODE_WEATHER_FETCH);
     setCpuPerformance();
     syncProgressBegin();

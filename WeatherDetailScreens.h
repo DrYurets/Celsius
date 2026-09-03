@@ -430,6 +430,21 @@ inline void drawSyncStatusScreen(DisplayT &display,
   display.print(" ");
   display.print(timeBuf);
 
+  // Восход/закат из RTC (если уже есть на сегодня) — в правой колонке статуса.
+  if (weatherSunriseHour >= 0 && weatherSunsetHour >= 0) {
+    char sunBuf[12];
+    snprintf(sunBuf, sizeof(sunBuf), "%02d:%02d", (int)weatherSunriseHour, (int)weatherSunriseMin);
+    display.setCursor(72, 60);
+    display.print("Восх:");
+    display.setCursor(72, 74);
+    display.print(sunBuf);
+    snprintf(sunBuf, sizeof(sunBuf), "%02d:%02d", (int)weatherSunsetHour, (int)weatherSunsetMin);
+    display.setCursor(72, 94);
+    display.print("Зак:");
+    display.setCursor(72, 108);
+    display.print(sunBuf);
+  }
+
   display.display();
 }
 

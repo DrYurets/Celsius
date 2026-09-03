@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <cmath>
+#include <time.h>
 
 // Open-Meteo Forecast API: https://open-meteo.com/en/docs
 
@@ -56,6 +57,12 @@ RTC_DATA_ATTR float weatherDailyWindDayMs[4] = { NAN, NAN, NAN, NAN };
 RTC_DATA_ATTR float weatherDailyPrecipDayPct[4] = { NAN, NAN, NAN, NAN };
 RTC_DATA_ATTR float weatherNearestNightMinC = NAN;
 RTC_DATA_ATTR int32_t weatherNearestNightWmoCode = -1;
+/** Восход/закат на локальную дату weatherSunLocalDate (YYYYMMDD); часы/минуты wall-clock, -1 = нет данных. */
+RTC_DATA_ATTR uint32_t weatherSunLocalDate = 0;
+RTC_DATA_ATTR int8_t weatherSunriseHour = -1;
+RTC_DATA_ATTR int8_t weatherSunriseMin = -1;
+RTC_DATA_ATTR int8_t weatherSunsetHour = -1;
+RTC_DATA_ATTR int8_t weatherSunsetMin = -1;
 /** Кеш hourly для главного экрана: от текущего часа API ≥24 слотов; на экране — 3 часа после часа на часах. */
 constexpr int kWeatherHourlyAheadCount = 3;
 constexpr int kWeatherHourlyCacheCount = 24;
@@ -85,6 +92,60 @@ static inline int weatherHourFromIso(const String &iso) {
     return -1;
   }
   return hour;
+}
+
+/** YYYY-MM-DDTHH:MM… → hour/min; false если формат битый. */
+static inline bool weatherHmFromIso(const String &iso, int8_t &hour, int8_t &min) {
+  hour = -1;
+  min = -1;
+  if (iso.length() < 16) {
+    return false;
+  }
+  int h = iso.substring(11, 13).toInt();
+  int m = iso.substring(14, 16).toInt();
+  if (h < 0 || h > 23 || m < 0 || m > 59) {
+    return false;
+  }
+  hour = (int8_t)h;
+  min = (int8_t)m;
+  return true;
+}
+
+static inline uint32_t weatherLocalDateKeyFromTm(const struct tm &ti) {
+  return (uint32_t)(ti.tm_year + 1900) * 10000UL +
+         (uint32_t)(ti.tm_mon + 1) * 100UL +
+         (uint32_t)ti.tm_mday;
+}
+
+static inline uint32_t weatherLocalDateKeyFromIsoDate(const String &isoDate) {
+  // YYYY-MM-DD…
+  if (isoDate.length() < 10) {
+    return 0;
+  }
+  int y = isoDate.substring(0, 4).toInt();
+  int mo = isoDate.substring(5, 7).toInt();
+  int d = isoDate.substring(8, 10).toInt();
+  if (y < 2000 || mo < 1 || mo > 12 || d < 1 || d > 31) {
+    return 0;
+  }
+  return (uint32_t)y * 10000UL + (uint32_t)mo * 100UL + (uint32_t)d;
+}
+
+static inline bool weatherSunTimesValidForLocal(time_t local) {
+  if (weatherSunriseHour < 0 || weatherSunsetHour < 0 || weatherSunLocalDate == 0) {
+    return false;
+  }
+  struct tm ti = {};
+  localtime_r(&local, &ti);
+  return weatherSunLocalDate == weatherLocalDateKeyFromTm(ti);
+}
+
+/** Нужны свежие sunrise/sunset на текущие локальные сутки. */
+static inline bool needSunTimesRefresh(time_t local, bool weatherEnabled) {
+  if (!weatherEnabled || local <= 0) {
+    return false;
+  }
+  return !weatherSunTimesValidForLocal(local);
 }
 
 /** Три колонки: clockHour+1, +2, +3 из кеша (сдвигается при смене часа на часах). */
@@ -464,6 +525,43 @@ bool fetchOutdoorTemperature(const char* apiUrl, uint8_t weatherSource) {
         JsonArray a = daily["weather_code"].as<JsonArray>();
         for (uint8_t i = 0; i < 4 && i < a.size(); ++i) {
           if (!a[i].isNull()) weatherDailyWmoCode[i] = a[i].as<int32_t>();
+        }
+      }
+      // sunrise/sunset: берём слот daily на «сегодня» по daily.time (обычно [0]).
+      if (daily.containsKey("sunrise") && daily["sunrise"].is<JsonArray>() &&
+          daily.containsKey("sunset") && daily["sunset"].is<JsonArray>() &&
+          daily.containsKey("time") && daily["time"].is<JsonArray>()) {
+        JsonArray dayTime = daily["time"].as<JsonArray>();
+        JsonArray sunr = daily["sunrise"].as<JsonArray>();
+        JsonArray suns = daily["sunset"].as<JsonArray>();
+        int pick = -1;
+        // Предпочитаем индекс 0; если есть несколько дней — всё равно берём первый валидный.
+        for (size_t di = 0; di < dayTime.size() && di < sunr.size() && di < suns.size(); ++di) {
+          if (dayTime[di].isNull() || sunr[di].isNull() || suns[di].isNull()) {
+            continue;
+          }
+          pick = (int)di;
+          break;
+        }
+        if (pick >= 0) {
+          String dayIso = dayTime[pick].as<String>();
+          String riseIso = sunr[pick].as<String>();
+          String setIso = suns[pick].as<String>();
+          int8_t rh = -1, rm = -1, sh = -1, sm = -1;
+          uint32_t ymd = weatherLocalDateKeyFromIsoDate(dayIso);
+          if (ymd != 0 && weatherHmFromIso(riseIso, rh, rm) && weatherHmFromIso(setIso, sh, sm)) {
+            weatherSunLocalDate = ymd;
+            weatherSunriseHour = rh;
+            weatherSunriseMin = rm;
+            weatherSunsetHour = sh;
+            weatherSunsetMin = sm;
+            Serial.printf("[Weather] sunrise=%02d:%02d sunset=%02d:%02d date=%lu\n",
+                          (int)weatherSunriseHour,
+                          (int)weatherSunriseMin,
+                          (int)weatherSunsetHour,
+                          (int)weatherSunsetMin,
+                          (unsigned long)weatherSunLocalDate);
+          }
         }
       }
       if (daily.containsKey("temperature_2m_max") && daily["temperature_2m_max"].is<JsonArray>()) {

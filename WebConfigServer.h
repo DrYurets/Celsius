@@ -100,6 +100,7 @@ String getConfigPage() {
   html += "<p style='font-size: 12px; color: #aaa; margin-top: -5px; margin-bottom: 10px;'>Sensor selection is active in runtime and saved to EEPROM.</p>";
 
   html += "<h2>Night Mode</h2>";
+  html += "<p style='font-size: 12px; color: #aaa; margin-top: 0; margin-bottom: 10px;'>Equal start and end disables night sleep (clock stays on a per-minute schedule). Sunrise/sunset: at midnight if night sleep is off; otherwise on the first daytime weather update after wake.</p>";
   html += "<label>Night start time:</label>";
   html += "<div class='time-group'>";
   html += "<input type='number' name='nightStartH' min='0' max='23' value='" + String(settings.nightStartH) + "' required>";

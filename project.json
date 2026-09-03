@@ -1,10 +1,10 @@
 {
   "name": "Celsius Clock",
   "about": "Battery-powered ESP32-C3 OLED clock with NTP sync and weather",
-  "version": "A1.4.16",
-  "releaseDate": "2026-09-01",
-  "whatsNew": "SoftAP: WiFi.setSleep(false) — быстрее веб/OTA; убраны JPG датчиков из админки; LED GPIO0 через gpio_hold без вспышек при OLED.",
-  "notes": "A1.4.16: SoftAP no modem sleep + yield in loop; remove sensor Image.h gallery; LED gpio_hold on display/ADC.",
+  "version": "A1.4.17",
+  "releaseDate": "2026-09-03",
+  "whatsNew": "Трек солнца дугой (края внизу, вершина на высоте иконки); точки под иконкой не рисуются; hourly колонки −4 px; sunrise/sunset в статусе/расписании сети.",
+  "notes": "A1.4.17: sun path arc + hide track dots under glyph; drawPixel in OledDisplayCompat; sun schedule/status from earlier work.",
   "builds": [
     {
       "chipFamily": "ESP32-C3",
